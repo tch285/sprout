@@ -24,7 +24,6 @@ class Histogram1D:
         self.yerr = yerr
         self.widths = self.edges[1:] - self.edges[:-1]
         self.centers = centers
-        self.binning = binning
         self.transition = None
         self.label = None
         self._parse_title(title, custom_label)
@@ -139,12 +138,82 @@ class Histogram1D:
     # @classmethod
     # def handle_int(cls, arg):  # name doesn't matter
     #     return cls(f"From int: {arg}")
-    
-    def add_to(self, ax, color, as_marker = False, **kwargs):
-        if as_marker:
-            ax.plot(self.centers, self.contents, color = color, marker = as_marker, mfc = 'none', label = self.label, linestyle = '', markeredgecolor = color, alpha = 0.5, **kwargs)
+    def rebin(self, n = 2, width_normed = True):
+        if self.nbins % n != 0:
+            raise ValueError(f"Rebin number {n} is not a divisor of nbins {self.nbins}")
+        old_widths = self.widths
+        
+        self.edges = self.edges[::n]
+        self.widths = self.edges[1:] - self.edges[:-1]
+        ratios = self.edges[1:] / self.edges[:-1]
+
+        if np.allclose(self.widths, self.widths[0]):
+            self.binning = "lin"
+            self.centers = (self.edges[:-1] + self.edges[1:]) / 2
+        elif np.allclose(ratios, ratios[0]):
+            self.binning = "log"
+            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
         else:
-            ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], marker = 'o', linestyle = '', markersize = 3.5, label = self.label, mec='none', mfc=mplc.to_rgba(color, 1), ecolor = mplc.to_rgba(color, 0.5), **kwargs)
+            print("Binning style couldn't be verified, centers defaulting to log.")
+            self.binning = "log"
+            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        
+        self.xerrlow = self.centers - self.edges[:-1]
+        self.xerrup = self.edges[1:] - self.centers
+
+        # Modify contents
+        if width_normed:
+            self.contents *= old_widths # remove previous width norm
+            self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
+            self.contents /= self.widths # apply new width norm
+            
+            self.yerr *= old_widths # remove previous width norm
+            errsq = self.yerr ** 2 # get squares of errors
+            self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1)) # sum and square root to get errors
+            self.yerr /= self.widths # apply new width norm
+        else:
+            self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
+            errsq = self.yerr ** 2
+            self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1))
+
+        return self
+
+    def add_to(self, ax, color = None, as_marker = False, **kwargs):
+        if as_marker:
+            draw_args = {'marker': True,
+                         'mfc': 'none',
+                         'label': self.label,
+                         'ls': '',
+                         'alpha': 0.5,
+                         }
+            draw_args.update(kwargs)
+            if ('color' in kwargs and 'mec' not in kwargs and 'markeredgecolor' not in kwargs):
+                draw_args['mec'] = kwargs['color']
+            elif color:
+                draw_args['mec'] = color
+            ax.plot(self.centers, self.contents, **draw_args)
+        else:
+            draw_args = {'marker': 'o',
+                         'ls': '',
+                         'ms': 3.5,
+                         'label': self.label,
+                         'mec': 'none',
+                         'mfc': 'none',
+                         'alpha': 0.5,
+                         'mew': 0,
+                         }
+            draw_args.update(kwargs)
+            
+            if 'color' in kwargs:
+                draw_args['mfc'] = mplc.to_rgba(kwargs['color'], 1)
+                draw_args['ecolor'] = mplc.to_rgba(kwargs['color'], draw_args['alpha'])
+                draw_args['mec'] = mplc.to_rgba(kwargs['color'], draw_args['alpha'])
+            elif color:
+                draw_args['mfc'] = mplc.to_rgba(color, 1)
+                draw_args['ecolor'] = mplc.to_rgba(color, draw_args['alpha'])
+                draw_args['mec'] = mplc.to_rgba(color, draw_args['alpha'])
+
+            ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], **draw_args)
 
     def save(self, filename: str, show: bool = False, title = None):
         fig, ax = plt.subplots()
@@ -245,6 +314,8 @@ class Histogram1D:
     @classmethod
     def copy(cls, orig):
         return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
+    def selfcopy(self):
+        return Histogram1D("", self.contents.copy(), self.centers.copy(), self.edges.copy(), [self.xerrlow.copy(), self.xerrup.copy()], self.yerr.copy(), self.binning, self.label)
 
     def __len__(self): return self.nbins
     def __getitem__(self, idx): return self.contents[idx]
@@ -312,6 +383,8 @@ class Histogram1D:
         else:
             raise TypeError(f"Histogram1D cannot be multiplied by type {type(f)}.")
         return self
+    def __rmul__(self, f):
+        return self.__mul__(f)
     def __truediv__(self, f):
         if isinstance(f, (float, int)):
             return self.__mul__(1.0 / f)
@@ -326,7 +399,7 @@ class Histogram1D:
 
             return copy
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type f{type(f)}.")
+            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
     def __itruediv__(self, f):
         if isinstance(f, (float, int)):
             return self.__imul__(1.0 / f)
@@ -336,7 +409,11 @@ class Histogram1D:
             self.label = f"$\\frac{{ {gutils.clean(self.label)} }}{{ {gutils.clean(f.label)} }}$"
             return self
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type f{type(f)}.")
+            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
+    __radd__ = __add__
+    __rsub__ = __sub__
+    __rmul__ = __mul__
+
     def width_norm(self):
         self.contents /= self.widths
         self.yerr /= self.widths
