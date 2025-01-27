@@ -214,6 +214,10 @@ class Histogram1D:
                 draw_args['mec'] = mplc.to_rgba(color, draw_args['alpha'])
 
             ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], **draw_args)
+    
+    def add_step(self, ax, color, show_errors = False, **kwargs):
+        ax.hist(self.edges[:-1], self.edges, weights = self.contents,
+                histtype = 'step', color = color, **kwargs)
 
     def save(self, filename: str, show: bool = False, title = None):
         fig, ax = plt.subplots()
@@ -412,7 +416,7 @@ class Histogram1D:
             raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
     __radd__ = __add__
     __rsub__ = __sub__
-    __rmul__ = __mul__
+    # __rmul__ = __mul__
 
     def width_norm(self):
         self.contents /= self.widths
