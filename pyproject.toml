@@ -1,0 +1,23 @@
+[build-system]
+requires = ["flit_core >=3.11,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "sprout"
+description = "A Python package linking ROOT and matplotlib"
+version = "0.1.0"
+authors = [{name = "Tucker Hwang", email = "tucker_hwang@berkeley.edu"}]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+
+dependencies = [
+    "numpy>=2.1.0",
+    "uproot>=5.5.0",
+    "matplotlib>=3.9.0",
+    "scipy>=1.14.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/tch285/sprout"
