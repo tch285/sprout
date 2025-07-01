@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mplc
 import scipy.optimize as opt
 from scipy.stats import gmean
+import json
 # from functools import singledispatchmethod
 
 import cEEC_utils.gen_utils as gutils
-from cEEC_utils.Quantity import toQuant
+import cEEC_utils.fit as ff
 import uproot
-# import uproot
 
 class Histogram1D:
     """Class to convert ROOT histogram to NumPy arrays."""
@@ -24,11 +24,10 @@ class Histogram1D:
         self.yerr = yerr
         self.widths = self.edges[1:] - self.edges[:-1]
         self.centers = centers
-        self.binning = binning
         self.transition = None
         self.label = None
         self._parse_title(title, custom_label)
-    
+
     def set_title(self, title):
         self._parse_title(title, self.label)
 
@@ -89,6 +88,81 @@ class Histogram1D:
         return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
 
     @classmethod
+    def fromHepdata(cls, path, custom_label = None, return_syst = True):
+        with open(path) as file:
+            all_lines = file.read().splitlines()
+        name = all_lines[2]
+        val_lines = all_lines[12:-1]
+        values = np.asarray([line.split('\t') for line in val_lines], dtype = float).T
+        binL, binR, heights, yerr, syst = values
+        label = name if custom_label is None else custom_label
+        assert len(binL) == len(binR)
+        title = name
+        edges = np.append(binL, binR[-1])
+        widths = edges[1:] - edges[:-1]
+        with np.errstate(divide='raise'):
+            try:
+                ratios = edges[1:] / edges[:-1]
+            except FloatingPointError:
+                binning = "lin"
+
+        if np.allclose(widths, widths[0]):
+            binning = "lin"
+            centers = (edges[:-1] + edges[1:]) / 2
+        elif np.allclose(ratios, ratios[0]):
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+        else:
+            print("Binning style couldn't be verified, defaulting to log.")
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+
+        xerrlow = centers - edges[:-1]
+        xerrup = edges[1:] - centers
+        if return_syst:
+            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label), syst
+        else:
+            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
+
+    @classmethod
+    def fromJson(cls, path, custom_label = None, return_syst = True):
+        with open(path) as file:
+            info = json.load(file)
+        binL = info['bin_L']
+        binR = info['bin_R']
+        heights = info['val']
+        yerr = info['stat']
+        syst = info['syst']
+        label = info['name'] if custom_label is None else custom_label
+        assert len(binL) == len(binR)
+        title = info['name']
+        edges = np.append(binL, binR[-1])
+        widths = edges[1:] - edges[:-1]
+        with np.errstate(divide='raise'):
+            try:
+                ratios = edges[1:] / edges[:-1]
+            except FloatingPointError:
+                binning = "lin"
+
+        if np.allclose(widths, widths[0]):
+            binning = "lin"
+            centers = (edges[:-1] + edges[1:]) / 2
+        elif np.allclose(ratios, ratios[0]):
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+        else:
+            print("Binning style couldn't be verified, defaulting to log.")
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+
+        xerrlow = centers - edges[:-1]
+        xerrup = edges[1:] - centers
+        if return_syst:
+            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label), syst
+        else:
+            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
+
+    @classmethod
     def fromROOTfixed(cls, hist, custom_label = None):
         label = gutils.convert_from_name(hist.GetName()) if custom_label is None else custom_label
         nbins = hist.GetNbinsX()
@@ -139,14 +213,119 @@ class Histogram1D:
     # @classmethod
     # def handle_int(cls, arg):  # name doesn't matter
     #     return cls(f"From int: {arg}")
-    
-    def add_to(self, ax, color, as_marker = False, **kwargs):
-        if as_marker:
-            ax.plot(self.centers, self.contents, color = color, marker = as_marker, mfc = 'none', label = self.label, linestyle = '', markeredgecolor = color, alpha = 0.5, **kwargs)
-        else:
-            ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], marker = 'o', linestyle = '', markersize = 3.5, label = self.label, mec='none', mfc=mplc.to_rgba(color, 1), ecolor = mplc.to_rgba(color, 0.5), **kwargs)
+    def rebin(self, n = 2, width_normed = True):
+        if self.nbins % n != 0:
+            raise ValueError(f"Rebin number {n} is not a divisor of nbins {self.nbins}")
+        old_widths = self.widths
+        
+        self.edges = self.edges[::n]
+        self.widths = self.edges[1:] - self.edges[:-1]
+        ratios = self.edges[1:] / self.edges[:-1]
 
-    def save(self, filename: str, show: bool = False, title = None):
+        if np.allclose(self.widths, self.widths[0]):
+            self.binning = "lin"
+            self.centers = (self.edges[:-1] + self.edges[1:]) / 2
+        elif np.allclose(ratios, ratios[0]):
+            self.binning = "log"
+            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        else:
+            print("Binning style couldn't be verified, centers defaulting to log.")
+            self.binning = "log"
+            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        
+        self.xerrlow = self.centers - self.edges[:-1]
+        self.xerrup = self.edges[1:] - self.centers
+
+        # Modify contents
+        if width_normed:
+            self.contents *= old_widths # remove previous width norm
+            self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
+            self.contents /= self.widths # apply new width norm
+            
+            self.yerr *= old_widths # remove previous width norm
+            errsq = self.yerr ** 2 # get squares of errors
+            self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1)) # sum and square root to get errors
+            self.yerr /= self.widths # apply new width norm
+        else:
+            self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
+            errsq = self.yerr ** 2
+            self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1))
+
+        return self
+
+    def add_to(self, ax, color = None, as_step = False, as_marker = False, as_line = False, as_shaded_line = False, **kwargs):
+        if as_step:
+            return ax.hist(self.edges[:-1], self.edges, weights = self.contents,
+                    histtype = 'step', color = color, **kwargs)
+        elif as_marker:
+            draw_args = {'marker': 'o',
+                         'mfc': 'none',
+                         'label': self.label,
+                         'ls': '',
+                         'alpha': 0.5,
+                         }
+            draw_args.update(kwargs)
+            if ('color' in kwargs and 'mec' not in kwargs and 'markeredgecolor' not in kwargs):
+                draw_args['mec'] = kwargs['color']
+            elif color:
+                draw_args['mec'] = color
+            return ax.plot(self.centers, self.contents, **draw_args)
+        elif as_line:
+            draw_args = {'label': self.label,
+                         'alpha': 0.8,
+                         'color': color,
+                         'lw'   : 1.3,
+                         }
+            draw_args.update(kwargs)
+            return ax.plot(self.centers, self.contents, **draw_args)
+        elif as_shaded_line:
+            draw_args = {'label': self.label,
+                         'color': color,
+                         }
+            draw_args.update(kwargs)
+            ax.plot(self.centers, self.contents, alpha = 0.6, lw=1.2, **draw_args)
+            return ax.fill_between(self.centers, self.contents - self.yerr, self.contents + self.yerr,
+                            alpha = 0.3, lw = 0, **draw_args)
+        else:
+            draw_args = {'marker': 'o',
+                         'ls': '',
+                         'ms': 3.5,
+                         'label': self.label,
+                         'mec': 'none',
+                         'mfc': 'none',
+                         'alpha': 0.8,
+                         'mew': 0,
+                         'zorder': 100
+                         }
+            draw_args.update(kwargs)
+            # default_alphas = {'e': 0.8, 'm': 1} # alphas for errorbars (e) vs. markers (m)
+            
+            if 'color' in kwargs:
+                draw_args['mfc'] = mplc.to_rgba(kwargs['color'], 1)
+                draw_args['ecolor'] = mplc.to_rgba(kwargs['color'], draw_args['alpha'])
+                draw_args['mec'] = mplc.to_rgba(kwargs['color'], draw_args['alpha'])
+            elif color:
+                if 'mfc' in kwargs:
+                    if kwargs['mfc'] in ['none', "white", 'w']:
+                        draw_args['mfc'] = kwargs['mfc']
+                        draw_args['ecolor'] = mplc.to_rgba(color, draw_args['alpha'])
+                        draw_args['mec'] = mplc.to_rgba(color, 1)
+                        # draw_args['mec'] = mplc.to_rgba(color, draw_args['alpha'])
+                    else:
+                        draw_args['mfc'] = mplc.to_rgba(kwargs['mfc'], 1)
+                        draw_args['ecolor'] = mplc.to_rgba(kwargs['mfc'], draw_args['alpha'])
+                        draw_args['mec'] = mplc.to_rgba(kwargs['mfc'], draw_args['alpha'])
+                else:
+                    draw_args['mfc'] = mplc.to_rgba(color, 1)
+                    draw_args['ecolor'] = mplc.to_rgba(color, draw_args['alpha'])
+                    draw_args['mec'] = mplc.to_rgba(color, draw_args['alpha'])
+            # print(draw_args['mfc'])
+            # print(draw_args['ecolor'])
+            # print(draw_args['mec'])
+            draw_args.pop('alpha')
+            return ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], **draw_args)
+
+    def plot(self, filename: str, show: bool = False, title = None):
         fig, ax = plt.subplots()
         ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], marker = 'o', linestyle = '', markersize = 2, label = self.label, color = 'r')
         ax.set_title(self.title) if title is None else ax.set_title(title)
@@ -175,8 +354,6 @@ class Histogram1D:
             rbound = len(bool_arr) - np.flip(bool_arr).argmax() - 1#, len(bool_arr) - np.flip(bool_arr).argmax() + 1
             left = gmean(self.centers[lbound:lbound + 2])
             right = gmean(self.centers[rbound:rbound + 2])
-            # print(left)
-            # print(right)
             fwhm = right - left
             ax.hlines(self.peak / 2, left, right, color = color, label = f"FWHM $\\approx {fwhm:.2f}$", linestyle='--', alpha = 0.4)
             return fwhm
@@ -184,57 +361,97 @@ class Histogram1D:
             self.calculate_transition()
             print(self.transition)
             return self.calculate_fwhm(ax)
-    
-    def calculate_transition(self, pT_scope = 0.3, shift = 4):
+
+    def calculate_transition(self, xrange = 0.3, shift = 4, func = 'quad', exp = 1.5, syst = None):
         # print(f"Calculating transition for H1D {self.title}.")
-        self.fit_idx_min, self.fit_idx_max = self._find_range(pT_scope, shift)
+        self.fit_idx_min, self.fit_idx_max = self._find_range(xrange, shift)
         fitx = self.centers[self.fit_idx_min:self.fit_idx_max + 1]
         fity = np.abs(self.contents[self.fit_idx_min:self.fit_idx_max + 1])
         # abs_contents = np.abs(self.contents)
-        unc = self.yerr[self.fit_idx_min:self.fit_idx_max + 1]
-
-        def quad_log(x, x0, y0, a):
-            return a * (x - x0) * (x - x0) + y0
-        
-        # print("fitx", fitx)
-        # print("fity", fity)
-        [self.transition, self.peak, self.a], cov = opt.curve_fit(quad_log, np.log10(fitx), fity, [np.log10(fitx[fity.argmax()]), fity.max(), -10], unc, absolute_sigma = True)
+        if syst is not None:
+            unc = np.sqrt(self.yerr ** 2 + (self.contents * syst) ** 2)[self.fit_idx_min:self.fit_idx_max + 1]
+            # unc = self.yerr[self.fit_idx_min:self.fit_idx_max + 1]
+        else:
+            unc = self.yerr[self.fit_idx_min:self.fit_idx_max + 1]
         factor = 1
         if self.contents[np.abs(self.contents).argmax()] < 0:
             factor = -1
-        self.a, self.peak = factor * self.a, factor * self.peak
-        self.transition_err = np.sqrt(np.diag(cov))[0]
-        self.transition = np.power(10, self.transition)
-        # print(f"Transition found for H1D {self.title} at Q={self.transition:.2f} GeV.")
-        # print('')
-    
-    def _find_range(self, pT_scope, shift):
+
+        if func == 'quad':
+            [self.transition, self.peak, self.a], cov = opt.curve_fit(ff.quad_log, fitx, fity, [fitx[fity.argmax()], fity.max(), -10], unc, absolute_sigma = True)
+            self.a, self.peak = factor * self.a, factor * self.peak
+            self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+        elif func == 'gaus':
+            [self.transition, self.peak, self.sg], cov = opt.curve_fit(ff.gaus_log, fitx, fity, [fitx[fity.argmax()], fity.max(), 3.5], unc, absolute_sigma = True)
+            self.peak *= factor
+            self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+        elif func == 'cust_TC':
+            init_tr = fitx[fity.argmax()]
+            init_pk = fity.max()
+            T0  = 2 * init_tr ** 2
+            C0 = T0 * init_pk * 1.5 * np.sqrt(3)
+            def func(x, T, C):
+                return ff.cust_TC(x, T, C, exp)
+            [T, C], cov = opt.curve_fit(func, fitx, fity, [T0, C0], unc, absolute_sigma = True)
+            T_err, C_err = np.sqrt(np.diag(cov))
+            assert cov[0, 1] == cov[1, 0]
+            covTC = cov[0, 1]
+            self.transition = np.sqrt(T / 2)
+            self.transition_err = T_err / (np.sqrt(8 * T))
+            self.peak = (2 * C) / (3 * np.sqrt(3) * T)
+            self.peak_err = 2 / (3 * np.sqrt(3)) * self.peak * np.sqrt( (C_err / C)**2 + (T_err / T)**2 - 2 * covTC / (T *C) )
+            self.peak *= factor
+        elif func == 'cust_tp':
+            t0 = fitx[fity.argmax()]
+            p0 = fity.max()
+            def func(x, t, p):
+                return ff.cust_tp(x, t, p, exp)
+            [self.transition, self.peak], cov = opt.curve_fit(func, fitx, fity, [t0, p0], unc, absolute_sigma = True)
+            self.peak *= factor
+            self.transition_err, self.peak_err = np.sqrt(np.diag(cov))
+        else:
+            print("Invalid function name, exiting.")
+            return
+
+    def _find_range(self, xrange, shift):
         abs_contents = np.abs(self.contents)
         idx = abs_contents[shift:].argmax() + shift
-        
-        if isinstance(pT_scope, int) and pT_scope >= 1:
-            fit_idx_min = idx - pT_scope
-            fit_idx_max = idx + pT_scope
-        elif isinstance(pT_scope, float) and pT_scope < 1:
+
+        if isinstance(xrange, int) and xrange >= 1:
+            fit_idx_min = idx - xrange
+            fit_idx_max = idx + xrange
+        elif isinstance(xrange, float) and xrange < 1:
             max_val = abs_contents[idx]
-            cutoff = max_val * (1 - pT_scope)
+            cutoff = max_val * (1 - xrange)
 
             def check(curr_idx, incr, cutoff):
-                # print(f'cutoff is {cutoff}, idx to check is {curr_idx} and current value {abs_contents[curr_idx]}')
                 if abs_contents[curr_idx] > cutoff:
-                    # print('moving on')
                     return check(curr_idx + incr, incr, cutoff)
                 else:
-                    # print('stopped, returning idx', curr_idx - incr, "with value", abs_contents[curr_idx - incr])
-                    # return curr_idx - incr
                     return curr_idx
-            
+
             fit_idx_min = check(idx - 1, -1, cutoff)
             fit_idx_max = check(idx + 1, 1, cutoff)
-            # print(fit_idx_min, fit_idx_max)
-            # print('')
+        elif isinstance(xrange, (tuple, list)) and len(xrange) == 3:
+            xmin, xmax, greedy = xrange
+            close_min = np.isclose(self.edges, xmin, rtol = 1e-3)
+            if sum(close_min) == 1:
+                fit_idx_min = np.argwhere(close_min)[0, 0]
+            elif greedy:
+                fit_idx_min = np.searchsorted(self.edges, xmin, side='left') - 1
+            else:
+                fit_idx_min = np.searchsorted(self.edges, xmin, side='left')
+
+            close_max = np.isclose(self.edges, xmax, rtol = 1e-3)
+            if sum(close_max) == 1:
+                fit_idx_max = np.argwhere(close_max)[0, 0]
+            elif greedy:
+                fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 1
+            else:
+                fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 2
+            print(fit_idx_min, fit_idx_max)
         else:
-            raise ValueError("pT scope for fitting invalid.")
+            raise ValueError("X range for fitting invalid.")
         return fit_idx_min, fit_idx_max
 
     def show_fit_curve(self, ax, color):
@@ -242,9 +459,19 @@ class Histogram1D:
         ys = self.a * np.square(np.log10(xs / self.transition)) + self.peak
         ax.plot(xs, ys, color = color)
 
+    def save(self, f, name):
+        if isinstance(f, np.lib.npyio.NpzFile):
+            pass
+        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
+    @classmethod
+    def load(cls, fname):
+        pass
+        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
     @classmethod
     def copy(cls, orig):
         return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
+    def selfcopy(self):
+        return Histogram1D("", self.contents.copy(), self.centers.copy(), self.edges.copy(), [self.xerrlow.copy(), self.xerrup.copy()], self.yerr.copy(), self.binning, self.label)
 
     def __len__(self): return self.nbins
     def __getitem__(self, idx): return self.contents[idx]
@@ -312,6 +539,8 @@ class Histogram1D:
         else:
             raise TypeError(f"Histogram1D cannot be multiplied by type {type(f)}.")
         return self
+    def __rmul__(self, f):
+        return self.__mul__(f)
     def __truediv__(self, f):
         if isinstance(f, (float, int)):
             return self.__mul__(1.0 / f)
@@ -326,7 +555,7 @@ class Histogram1D:
 
             return copy
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type f{type(f)}.")
+            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
     def __itruediv__(self, f):
         if isinstance(f, (float, int)):
             return self.__imul__(1.0 / f)
@@ -336,10 +565,28 @@ class Histogram1D:
             self.label = f"$\\frac{{ {gutils.clean(self.label)} }}{{ {gutils.clean(f.label)} }}$"
             return self
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type f{type(f)}.")
+            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
+    __radd__ = __add__
+    def __abs__(self):
+        copy = self.selfcopy()
+        copy.contents = np.abs(copy.contents)
+        return copy
+    # __rsub__ = __sub__
+    # __rmul__ = __mul__
+    def make_abs(self):
+        self.contents = np.abs(self.contents)
+
+    def combine(self, hist):
+        res = self.selfcopy()
+        res.label = ""
+        res.contents = (self.contents / (self.yerr ** 2) + hist.contents / (hist.yerr ** 2)) / ((1 / self.yerr ** 2) + (1 / (hist.yerr ** 2) ))
+        res.yerr = 1 / np.sqrt((1 / self.yerr ** 2) + (1 / (hist.yerr ** 2) ))
+        return res
+
     def width_norm(self):
         self.contents /= self.widths
         self.yerr /= self.widths
+        return self
     def scalex(self, f: float):
         self.edges *= f
         self.centers *= f
@@ -349,18 +596,29 @@ class Histogram1D:
         self.contents /= f
         self.yerr /= abs(f)
         return self
-    # def 
+    def to_pdf(self, do_width_norm = False):
+        if do_width_norm:
+            self.width_norm()
+        integral = np.sum(self.contents * self.widths)
+        self.contents /= integral
+        self.yerr /= integral
+        return self
+    def do_barlow(self, val = 1, nsig = 2):
+        self.contents = gutils.apply_barlow(self.contents, self.yerr, val, nsig)
+    def smooth(self, n, bin_min = 1, bin_max = None):
+        if bin_max is None:
+            bin_max = self.nbins
+        if self.nbins < 3:
+            print(f"Smooth only works for histograms with 3 or more bins (nbins = {self.nbins})")
+            return
+        firstbin = bin_min - 1
+        lastbin = bin_max - 1
+        nbins = lastbin - firstbin + 1
+        xx = np.zeros(nbins)
+        for i in range(nbins):
+            xx[i] = self.contents[i + firstbin]
 
-class HistogramENC(Histogram1D):
-    def __init__(self, title, contents, centers, edges, xerr, yerr, binning, custom_label, order = 2, xquant = None, yquant = None, ) -> None:
-        super(Histogram1D, self).__init__(title, contents, centers, edges, xerr, yerr, binning, custom_label)
-        self.order = order
-        self.xquant, self.yquant = toQuant(xquant), toQuant(yquant)
-    
-    def to_virtuality(self, pT: int):
-        self.edges *= pT
-        self.centers *= pT
-        self.widths *= pT
-        self.xerrlow *= pT
-        self.xerrup *= pT
-        self /= pT
+        #TODO: xx modified in place? or need to return new np array
+        xx_smoothed = gutils.apply_smoothing(nbins, xx, n)
+        for i in range(nbins):
+            self.contents[i+firstbin] = xx_smoothed[i]
