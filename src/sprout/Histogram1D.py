@@ -1,247 +1,200 @@
-# import ROOT
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.colors as mplc
-import scipy.optimize as opt
-from scipy.stats import gmean
 import json
-# from functools import singledispatchmethod
+from io import TextIOBase
 
-import cEEC_utils.gen_utils as gutils
-import cEEC_utils.fit as ff
-import uproot
+import fit as ff
+import gen_utils as gutils
+import matplotlib.colors as mplc
+import matplotlib.pyplot as plt
+import numpy as np
+import ROOT
+import scipy.optimize as opt
+import uproot as ur
+from scipy.stats import gmean
 
 class Histogram1D:
     """Class to convert ROOT histogram to NumPy arrays."""
-    def __init__(self, title, contents, centers, edges, xerr, yerr, binning, custom_label = None) -> None:
+    def __init__(self, name, contents, centers, edges, xerr, yerr, binning, label = None) -> None:
         assert len(centers) == (len(edges) - 1)
         self.nbins = len(centers)
+        assert binning in ['lin', 'log']
         self.binning = binning
+        self.name = name
 
         self.contents = contents
         self.edges = edges
-        self.xerrlow, self.xerrup = xerr
+        self.xerrlo, self.xerrhi = xerr
         self.yerr = yerr
         self.widths = self.edges[1:] - self.edges[:-1]
         self.centers = centers
+        self.label = label
         self.transition = None
-        self.label = None
-        self._parse_title(title, custom_label)
 
-    def set_title(self, title):
-        self._parse_title(title, self.label)
+    @classmethod
+    def load(cls, file, name, label = None):
+        if isinstance(file, str):
+            if file.endswith(".root"):
+                return cls.from_uproot(file, name, label)
+            elif file.endswith(".json"):
+                return cls.from_json(file, name, label)
+            elif file.endswith(".txt"):
+                return cls.from_hepdata(file, name, label)
+        elif isinstance(file, ur.ReadOnlyDirectory):
+            return cls._from_uproot(file, name, label)
+        elif isinstance(file, TextIOBase):
+            if file.name.endswith(".json"):
+                return cls._from_json(file, name, label)
+            elif file.name.endswith(".txt"):
+                return cls._from_hepdata(file, name, label)
+        elif isinstance(file, ROOT.TFile):
+            return cls.from_TFile(file, name, label)
+        elif isinstance(file, ROOT.TH1):
+            return cls.from_TH1(file, name, label)
+        raise TypeError(f"Could not parse this type for file: {type(file)}")
+
+    @classmethod
+    def _from_arrays(cls, name, heights, edges, errors, label = ""):
+        widths = edges[1:] - edges[:-1]
+        with np.errstate(divide='raise'):
+            try:
+                ratios = edges[1:] / edges[:-1]
+            except FloatingPointError:
+                binning = "lin"
+        with np.errstate(divide='raise'):
+            try:
+                ratios = edges[1:] / edges[:-1]
+            except FloatingPointError:
+                binning = "lin"
+
+        if np.allclose(widths, widths[0]):
+            binning = "lin"
+            centers = (edges[:-1] + edges[1:]) / 2
+        elif np.allclose(ratios, ratios[0]):
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+        else:
+            print("Binning style couldn't be verified, defaulting to log.")
+            binning = "log"
+            centers = np.sqrt(edges[:-1] * edges[1:])
+        xerrlo = centers - edges[:-1]
+        xerrhi = edges[1:] - centers
+
+        return cls(name, heights, centers, edges, [xerrlo, xerrhi], errors, binning, label)
+
+    @classmethod
+    def from_uproot(cls, file, name, label):
+        """Extract Histogram1D from file with uproot."""
+        with ur.open(file) as f:
+            return cls._from_uproot(f, name, label)
+
+    @classmethod
+    def _from_uproot(cls, file, name, label):
+        """Extract Histogram1D from opened uproot file."""
+        h = file[name]
+        return cls._from_arrays(name, h.values(), h.axis().edges, h.errors(), label)
+
+    @classmethod
+    def from_TH1(cls, h, name, label):
+        """Extract Histogram1D from existing TH1 object."""
+        hname = name if name else h.GetName()
+
+        nbins = h.GetNbinsX()
+        if h.GetXaxis().GetXbins().GetSize() != 0: # variable edges
+            edges = np.array(h.GetXaxis().GetXbins())
+        else: # fixed edges
+            edges = np.linspace(h.GetXaxis().GetXmin(), h.GetXaxis().GetXmax(), nbins + 1)
+
+        heights = np.array([h.GetBinContent(i) for i in range(1, nbins + 1)])
+        errors = np.array([h.GetBinErrorLow(i) for i in range(1, nbins + 1)])
+        return cls._from_arrays(hname, heights, edges, errors, label)
+
+    @classmethod
+    def from_TFile(cls, file, name, label):
+        """Extract Histogram1D from open TFile object."""
+        h = file.Get(name)
+        return cls.from_TH1(h, name, label)
+
+    @classmethod
+    def from_hepdata(cls, file, name, label):
+        """Extract Histogram1D from HEPData txt file."""
+        with open(file) as f:
+            return cls._from_hepdata(f, name, label)
+
+    @classmethod
+    def _from_hepdata(cls, file, name, label):
+        """Extract Histogram1D from opened HEPData txt file."""
+        lines = file.read().splitlines()
+        hname = name if name else lines[2]
+        val_lines = lines[12:-1]
+        values = np.asarray([line.split('\t') for line in val_lines], dtype = float).T
+        binL, binR, heights, errors, syst = values
+        assert len(binL) == len(binR)
+        edges = np.append(binL, binR[-1])
+
+        return cls._from_arrays(hname, heights, edges, errors, label), syst
+
+    @classmethod
+    def from_json(cls, path, name, label = None):
+        """Extract Histogram1D from JSON file."""
+        with open(path) as file:
+            return cls._from_json(file, name, label)
+
+    @classmethod
+    def _from_json(cls, file, name, label):
+        """Extract Histogram1D from opened JSON file."""
+        info = json.load(file)
+        heights = info['val']
+        errors = info['stat']
+        binL = info['bin_L']
+        binR = info['bin_R']
+        assert len(binL) == len(binR)
+        edges = np.append(binL, binR[-1])
+        syst = info['syst']
+        hname = name if name else info['name']
+        return cls._from_arrays(hname, heights, edges, errors, label), syst
+
+    @classmethod
+    def copy(cls, orig):
+        return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlo.copy(), orig.xerrhi.copy()], orig.yerr.copy(), orig.binning, orig.label)
+
+    def _selfcopy(self):
+        return Histogram1D(self.name, self.contents.copy(), self.centers.copy(), self.edges.copy(), [self.xerrlo.copy(), self.xerrhi.copy()], self.yerr.copy(), self.binning, self.label)
+
+    def set_binning(self, binning):
+        if binning == 'lin':
+            self.centers = (self.edges[:-1] + self.edges[1:]) / 2
+        elif binning == "log":
+            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        else:
+            raise ValueError(f"Binning style {binning} is invalid.")
+        self.binning = binning
 
     def norm_max(self, norm = 1):
         f = norm / self.contents.max()
         self.contents *= f
         self.yerr *= f
-    
-    def _parse_title(self, title, custom_label):
-        spl = title.split(";")
-        self.title = self.xlabel = self.ylabel = ""
-        try:
-            self.title = spl[0]
-            self.xlabel = spl[1]
-            self.ylabel = spl[2]
-        except IndexError:
-            pass
 
-        self.label = self.title if custom_label is None else custom_label
-
-    @classmethod
-    def fromROOT(cls, hist, custom_label = None):
-        label = gutils.convert_from_name(hist.GetName()) if custom_label is None else custom_label
-        nbins = hist.GetNbinsX()
-        title = hist.GetTitle()
-        edges = np.zeros(nbins + 1)
-        heights = np.zeros(nbins)
-        yerr = np.zeros(nbins)
-        for i in range(nbins):
-            edges[i] = hist.GetXaxis().GetXbins().At(i)
-            # print('got edge')
-            heights[i] = hist.GetBinContent(i+1)
-            # print('got height')
-            yerr[i] = hist.GetBinErrorLow(i+1)
-            assert yerr[i] == hist.GetBinErrorUp(i+1)
-        edges[nbins] = hist.GetXaxis().GetXbins().At(nbins)
-        widths = edges[1:] - edges[:-1]
-        with np.errstate(divide='raise'):
-            try:
-                ratios = edges[1:] / edges[:-1]
-            except FloatingPointError:
-                binning = "lin"
-
-        if np.allclose(widths, widths[0]):
-            binning = "lin"
-            centers = (edges[:-1] + edges[1:]) / 2
-        elif np.allclose(ratios, ratios[0]):
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-        else:
-            print("Binning style couldn't be verified, defaulting to log.")
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-        
-        xerrlow = centers - edges[:-1]
-        xerrup = edges[1:] - centers
-        
-        return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
-
-    @classmethod
-    def fromHepdata(cls, path, custom_label = None, return_syst = True):
-        with open(path) as file:
-            all_lines = file.read().splitlines()
-        name = all_lines[2]
-        val_lines = all_lines[12:-1]
-        values = np.asarray([line.split('\t') for line in val_lines], dtype = float).T
-        binL, binR, heights, yerr, syst = values
-        label = name if custom_label is None else custom_label
-        assert len(binL) == len(binR)
-        title = name
-        edges = np.append(binL, binR[-1])
-        widths = edges[1:] - edges[:-1]
-        with np.errstate(divide='raise'):
-            try:
-                ratios = edges[1:] / edges[:-1]
-            except FloatingPointError:
-                binning = "lin"
-
-        if np.allclose(widths, widths[0]):
-            binning = "lin"
-            centers = (edges[:-1] + edges[1:]) / 2
-        elif np.allclose(ratios, ratios[0]):
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-        else:
-            print("Binning style couldn't be verified, defaulting to log.")
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-
-        xerrlow = centers - edges[:-1]
-        xerrup = edges[1:] - centers
-        if return_syst:
-            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label), syst
-        else:
-            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
-
-    @classmethod
-    def fromJson(cls, path, custom_label = None, return_syst = True):
-        with open(path) as file:
-            info = json.load(file)
-        binL = info['bin_L']
-        binR = info['bin_R']
-        heights = info['val']
-        yerr = info['stat']
-        syst = info['syst']
-        label = info['name'] if custom_label is None else custom_label
-        assert len(binL) == len(binR)
-        title = info['name']
-        edges = np.append(binL, binR[-1])
-        widths = edges[1:] - edges[:-1]
-        with np.errstate(divide='raise'):
-            try:
-                ratios = edges[1:] / edges[:-1]
-            except FloatingPointError:
-                binning = "lin"
-
-        if np.allclose(widths, widths[0]):
-            binning = "lin"
-            centers = (edges[:-1] + edges[1:]) / 2
-        elif np.allclose(ratios, ratios[0]):
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-        else:
-            print("Binning style couldn't be verified, defaulting to log.")
-            binning = "log"
-            centers = np.sqrt(edges[:-1] * edges[1:])
-
-        xerrlow = centers - edges[:-1]
-        xerrup = edges[1:] - centers
-        if return_syst:
-            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label), syst
-        else:
-            return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
-
-    @classmethod
-    def fromROOTfixed(cls, hist, custom_label = None):
-        label = gutils.convert_from_name(hist.GetName()) if custom_label is None else custom_label
-        nbins = hist.GetNbinsX()
-        edges = np.linspace(hist.GetXaxis().GetXmin(), hist.GetXaxis().GetXmax(), nbins + 1)
-        title = hist.GetTitle()
-        heights = np.zeros(nbins)
-        yerr = np.zeros(nbins)
-        for i in range(nbins):
-            heights[i] = hist.GetBinContent(i+1)
-            yerr[i] = hist.GetBinErrorLow(i+1)
-            assert yerr[i] == hist.GetBinErrorUp(i+1)
-
-        binning = "lin"
-        centers = (edges[:-1] + edges[1:]) / 2
-        xerrlow = centers - edges[:-1]
-        xerrup = edges[1:] - centers
-        
-        return cls(title, heights, centers, edges, [xerrlow, xerrup], yerr, binning, label)
-    
-    @classmethod
-    def fromUproot(cls, *args):
-        # other_args = args[1:]
-        if isinstance(args[0], uproot.reading.ReadOnlyDirectory):
-            # file given but not hist, hist name is next arg
-            # args[1] is the filename
-            pass
-        elif isinstance(args[0], uproot.behaviors.TH1.TH1):
-            # it's already opened and the hist is give
-            pass
-        elif isinstance(args[0], uproot.behaviors.TH1.TH1):
-            pass
-
-    # @singledispatchmethod
-    # @classmethod
-    # def fromUproot(cls, arg):
-    #     raise NotImplementedError("Unknown type")
-    
-    # # Register an implementation for strings
-    # # The _ name is just a convention; could be any name
-    # @fromUproot.register(str)
-    # @classmethod
-    # def _(cls, arg):
-    #     return cls(f"From string: {arg}")
-    
-    # # Register an implementation for integers
-    # # Could use a different name instead of _
-    # @fromUproot.register(int)
-    # @classmethod
-    # def handle_int(cls, arg):  # name doesn't matter
-    #     return cls(f"From int: {arg}")
     def rebin(self, n = 2, width_normed = True):
         if self.nbins % n != 0:
             raise ValueError(f"Rebin number {n} is not a divisor of nbins {self.nbins}")
         old_widths = self.widths
-        
+
         self.edges = self.edges[::n]
         self.widths = self.edges[1:] - self.edges[:-1]
-        ratios = self.edges[1:] / self.edges[:-1]
 
-        if np.allclose(self.widths, self.widths[0]):
-            self.binning = "lin"
+        if self.binning == "lin":
             self.centers = (self.edges[:-1] + self.edges[1:]) / 2
-        elif np.allclose(ratios, ratios[0]):
-            self.binning = "log"
-            self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
         else:
-            print("Binning style couldn't be verified, centers defaulting to log.")
-            self.binning = "log"
             self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
-        
-        self.xerrlow = self.centers - self.edges[:-1]
-        self.xerrup = self.edges[1:] - self.centers
+
+        self.xerrlo = self.centers - self.edges[:-1]
+        self.xerrhi = self.edges[1:] - self.centers
 
         # Modify contents
         if width_normed:
             self.contents *= old_widths # remove previous width norm
             self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
             self.contents /= self.widths # apply new width norm
-            
+
             self.yerr *= old_widths # remove previous width norm
             errsq = self.yerr ** 2 # get squares of errors
             self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1)) # sum and square root to get errors
@@ -323,14 +276,14 @@ class Histogram1D:
             # print(draw_args['ecolor'])
             # print(draw_args['mec'])
             draw_args.pop('alpha')
-            return ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], **draw_args)
+            return ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlo, self.xerrhi], **draw_args)
 
-    def plot(self, filename: str, show: bool = False, title = None):
+    def plot(self, filename: str, xlabel = "", ylabel = "", show: bool = False):
         fig, ax = plt.subplots()
-        ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlow, self.xerrup], marker = 'o', linestyle = '', markersize = 2, label = self.label, color = 'r')
-        ax.set_title(self.title) if title is None else ax.set_title(title)
-        ax.set_xlabel(self.xlabel)
-        ax.set_ylabel(self.ylabel)
+        ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlo, self.xerrhi], marker = 'o', linestyle = '', markersize = 2, label = self.label, color = 'r')
+        ax.set_title(self.label) if self.label is not None else self.name
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
 
         if self.binning == 'log':
             ax.set_yscale('log')
@@ -338,11 +291,12 @@ class Histogram1D:
         fig.savefig(filename)
         if show:
             plt.show()
+        fig.close()
 
     def add_transition_to(self, ax, color, overwrite = False, show_curve = False):
         if self.transition is None or overwrite:
             self.calculate_transition()
-        self.transition_line = ax.axvline(self.transition, color = color, label = f"$T \\approx {self.transition:.2f}\pm {self.transition_err:.3f}$ GeV", linewidth = 0.6)
+        self.transition_line = ax.axvline(self.transition, color = color, label = f"$T \\approx {self.transition:.2f}\\pm {self.transition_err:.3f}$ GeV", linewidth = 0.6)
         if show_curve:
             self.show_fit_curve(ax, color)
 
@@ -462,123 +416,173 @@ class Histogram1D:
     def save(self, f, name):
         if isinstance(f, np.lib.npyio.NpzFile):
             pass
-        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
-    @classmethod
-    def load(cls, fname):
-        pass
-        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
-    @classmethod
-    def copy(cls, orig):
-        return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlow.copy(), orig.xerrup.copy()], orig.yerr.copy(), orig.binning, orig.label)
-    def selfcopy(self):
-        return Histogram1D("", self.contents.copy(), self.centers.copy(), self.edges.copy(), [self.xerrlow.copy(), self.xerrup.copy()], self.yerr.copy(), self.binning, self.label)
+        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlo.copy(), orig.xerrhi.copy()], orig.yerr.copy(), orig.binning, orig.label)
 
     def __len__(self): return self.nbins
     def __getitem__(self, idx): return self.contents[idx]
     def __setitem__(self, idx, val): self.contents[idx] = val
-    def __str__(self): return f"{self.label};{self.title};{self.xlabel};{self.ylabel}"
-    def __add__(self, hist):
-        if not np.allclose(self.edges, hist.edges):
-            raise ValueError(f"Histograms '{self.title}' and '{hist.title}' edges do not match - cannot add.")
-        cls = self.__class__
-        copy = cls.copy(self)
-        copy.yerr = np.sqrt(np.square(self.yerr) + np.square(hist.yerr))
-        copy.contents = self.contents + hist.contents
-        copy.label = f"${gutils.clean(copy.label)} + {gutils.clean(hist.label)}$"
-        return copy
-    def __iadd__(self, hist):
-        if not np.allclose(self.edges, hist.edges):
-            raise ValueError(f"Histograms '{self.title}' and '{hist.title}' edges do not match - cannot add.")
-        self.yerr = np.sqrt(np.square(self.yerr) + np.square(hist.yerr))
-        self.contents += hist.contents
-        self.label = f"${gutils.clean(self.label)} + {gutils.clean(hist.label)}$"
-        return self
-    def __sub__(self, hist):
-        if not np.allclose(self.edges, hist.edges):
-            raise ValueError(f"Histograms '{self.title}' and '{hist.title}' edges do not match - cannot add.")
-        cls = self.__class__
-        copy = cls.copy(self)
-        copy.yerr = np.sqrt(np.square(self.yerr) + np.square(hist.yerr))
-        copy.contents = self.contents - hist.contents
-        copy.label = f"${gutils.clean(copy.label)} - {gutils.clean(hist.label)}$"
-        return copy
-    def __isub__(self, hist):
-        if not np.allclose(self.edges, hist.edges):
-            raise ValueError(f"Histograms '{self.title}' and '{hist.title}' edges do not match - cannot add.")
-        self.yerr = np.sqrt(np.square(self.yerr) + np.square(hist.yerr))
-        self.contents -= hist.contents
-        self.label = f"${gutils.clean(self.label)} - {gutils.clean(hist.label)}$"
-        return self
-    def __mul__(self, f):
-        cls = self.__class__
-        copy = cls.copy(self)
-        if isinstance(f, (float, int)):
-            copy.yerr *= abs(float(f))
-            copy.contents *= float(f)
-        elif isinstance(f, Histogram1D):
-            # if not(np.all(self.contents)):
-            #     print(f"{self.label} contains zeroes")
-            # if not(np.all(f.contents)):
-            #     print(f"{f.label} contains zeroes")
-            # copy.yerr = np.abs(self.contents * f.contents) * np.sqrt(np.square(self.yerr / self.contents) + np.square(f.yerr / f.contents))
-            copy.yerr = np.sqrt(np.square(self.yerr * f.contents) + np.square(f.yerr * self.contents))
-            copy.contents = self.contents * f.contents
-            copy.label = f"${gutils.clean(copy.label)} \\times {gutils.clean(f.label)}$"
+    def __str__(self): return f"Histogram1D '{self.name}' ({self.label})"
+    def __add__(self, other):
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy.contents = self.contents + other
+            copy.yerr = self.yerr.copy()
+            copy.label = f"{self.label} + {other}"
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "+")
+            copy.contents = self.contents + other.contents
+            copy.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
+            copy.label = f"{self.label} + {other.label}"
         else:
-            raise TypeError(f"Histogram1D cannot be multiplied by type {type(f)}.")
-        return copy
-    def __imul__(self, f):
-        if isinstance(f, (float, int)):
-            self.yerr *= abs(float(f))
-            self.contents *= float(f)
-        elif isinstance(f, Histogram1D):
-            self.yerr = self.contents * f.contents * np.sqrt(np.square(self.yerr / self.contents) + np.square(f.yerr / f.contents))
-            self.contents = self.contents * f.contents
-            self.label = f"${gutils.clean(self.label)} \\times {gutils.clean(f.label)}$"
+            return NotImplemented
 
+        return copy
+    def __iadd__(self, other):
+        if isinstance(other, (float, int)):
+            self.contents += other
+            self.label = f"{self.label} + {other}"
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "+=")
+            self.contents += other.contents
+            self.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
+            self.label = f"{self.label} + {other.label}"
         else:
-            raise TypeError(f"Histogram1D cannot be multiplied by type {type(f)}.")
-        return self
-    def __rmul__(self, f):
-        return self.__mul__(f)
-    def __truediv__(self, f):
-        if isinstance(f, (float, int)):
-            return self.__mul__(1.0 / f)
-        elif isinstance(f, Histogram1D):
-            cls = self.__class__
-            copy = cls.copy(self)
-            # print('self cont', self.contents)
-            # print('f cont', f.contents)
-            copy.yerr = np.abs(np.divide(self.contents, f.contents, out = np.zeros_like(self.contents), where = f.contents != 0)) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(f.yerr, f.contents, out = np.zeros_like(f.yerr), where = f.contents != 0)))
-            copy.contents = np.divide(self.contents, f.contents, out = np.zeros_like(self.contents), where = f.contents != 0)
-            copy.label = f"$\\frac{{ {gutils.clean(copy.label)} }}{{ {gutils.clean(f.label)} }}$"
+            return NotImplemented
 
-            return copy
+        return self
+    def __sub__(self, other):
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy.contents = self.contents - other
+            copy.yerr = self.yerr.copy()
+            copy.label = f"{self.label} - {other}"
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "-")
+            copy.contents = self.contents - other.contents
+            copy.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
+            copy.label = f"{copy.label} - {other.label}"
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
-    def __itruediv__(self, f):
-        if isinstance(f, (float, int)):
-            return self.__imul__(1.0 / f)
-        elif isinstance(f, Histogram1D):
-            self.yerr = np.divide(self.contents, f.contents, out = np.zeros_like(self.contents), where = f.contents != 0) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(f.yerr, f.contents, out = np.zeros_like(f.yerr), where = f.contents != 0)))
-            self.contents = np.divide(self.contents, f.contents, out = np.zeros_like(self.contents), where = f.contents != 0)
-            self.label = f"$\\frac{{ {gutils.clean(self.label)} }}{{ {gutils.clean(f.label)} }}$"
-            return self
+            return NotImplemented
+
+        return copy
+    def __isub__(self, other):
+        if isinstance(other, (float, int)):
+            self.contents = self.contents - other
+            self.label = f"{self.label} - {other}"
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "-=")
+            self.contents -= other.contents
+            self.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
+            self.label = f"{self.label} - {other.label}"
         else:
-            raise TypeError(f"Histogram1D cannot be divided by type {type(f)}.")
+            return NotImplemented
+
+        return self
+    def __mul__(self, other):
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy.contents *= float(other)
+            copy.yerr *= abs(float(other))
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "*")
+            copy.contents = self.contents * other.contents
+            copy.yerr = np.sqrt(np.square(self.yerr * other.contents) + np.square(other.yerr * self.contents))
+            copy.label = f"{copy.label} \u00D7 {other.label}"
+        else:
+            return NotImplemented
+
+        return copy
+    def __imul__(self, other):
+        if isinstance(other, (float, int)):
+            self.contents *= float(other)
+            self.yerr *= abs(float(other))
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "*=")
+            # yerr must be modified before contents
+            self.yerr = np.sqrt(np.square(self.yerr * other.contents) + np.square(other.yerr * self.contents))
+            self.contents = self.contents * other.contents
+            self.label = f"{self.label} \u00D7 {other.label}"
+        else:
+            return NotImplemented
+
+        return self
+    def __truediv__(self, other):
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy *= (1.0 / other)
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "/")
+            copy.contents = np.divide(self.contents, other.contents, out = np.zeros(self.nbins), where = other.contents != 0)
+            copy.yerr = np.sqrt(np.divide(self.yerr**2 , other.contents**2, out = np.zeros(self.nbins), where = other.contents != 0)
+                              + np.divide(self.contents**2 , other.contents**4, out = np.zeros(self.nbins), where = other.contents != 0) * other.yerr**2)
+            # copy.yerr = np.abs(np.divide(self.contents, other.contents, out = np.zeros_like(self.contents), where = other.contents != 0)) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(other.yerr, other.contents, out = np.zeros_like(other.yerr), where = other.contents != 0)))
+            copy.label = f"{self.label} / {other.label}"
+        else:
+            return NotImplemented
+
+        return copy
+    def __itruediv__(self, other):
+        if isinstance(other, (float, int)):
+            self *= (1.0 / other)
+        elif isinstance(other, Histogram1D):
+            self._check_matched_edges(other, "/=")
+            self.yerr = np.sqrt(np.divide(self.yerr**2 , other.contents**2, out = np.zeros(self.nbins), where = other.contents != 0)
+                              + np.divide(self.contents**2 , other.contents**4, out = np.zeros(self.nbins), where = other.contents != 0) * other.yerr**2)
+            # self.yerr = np.divide(self.contents, other.contents, out = np.zeros_like(self.contents), where = other.contents != 0) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(f.yerr, other.contents, out = np.zeros_like(f.yerr), where = other.contents != 0)))
+            self.contents = np.divide(self.contents, other.contents, out = np.zeros(self.nbins), where = other.contents != 0)
+            self.label = f"{self.label} / {other.label}"
+        else:
+            return NotImplemented
+
+        return self
     __radd__ = __add__
+    __rmul__ = __mul__
+    def __rsub__(self, other):
+        # called with other - self. Don't need to define for Histogram1D since __sub__ would be called first
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy.contents = other - self.contents
+            copy.label = f"{self.label} - {other}"
+        else:
+            return NotImplemented
+
+        return copy
+    def __rtruediv__(self, other):
+        # called with other / self. Don't need to define for Histogram1D since __truediv__ would be called first
+        copy = self._selfcopy()
+        if isinstance(other, (float, int)):
+            copy.contents = np.divide(other.contents, self.contents, out = np.zeros(self.nbins), where = other.contents != 0)
+            copy.yerr = self.yerr * np.divide(other.contents, self.contents ** 2, out = np.zeros(self.nbins), where = self.contents != 0)
+            copy.label = f"{self.label} / {other.label}"
+        else:
+            return NotImplemented
+
+        return copy
+    def __neg__(self):
+        copy = self._selfcopy()
+        copy.contents = - copy.contents
+        return copy
+    def __mod__(self, other):
+        """Check if two Histograms have compatible bin edges."""
+        if np.allclose(self.edges, other.edges):
+            return True
+        else:
+            return False
     def __abs__(self):
-        copy = self.selfcopy()
+        copy = self._selfcopy()
         copy.contents = np.abs(copy.contents)
         return copy
-    # __rsub__ = __sub__
-    # __rmul__ = __mul__
     def make_abs(self):
         self.contents = np.abs(self.contents)
 
+    def _check_matched_edges(self, other, op):
+        if not self % other:
+            raise ValueError(f"Histograms '{self.name}' and '{other.name}' edges do not match - cannot perform '{op}' operation.")
+
     def combine(self, hist):
-        res = self.selfcopy()
-        res.label = ""
+        """Combine two histograms with inverse-variance weighting."""
+        res = self._selfcopy()
+        res.label = f"Combined {self.label} + {hist.label}"
         res.contents = (self.contents / (self.yerr ** 2) + hist.contents / (hist.yerr ** 2)) / ((1 / self.yerr ** 2) + (1 / (hist.yerr ** 2) ))
         res.yerr = 1 / np.sqrt((1 / self.yerr ** 2) + (1 / (hist.yerr ** 2) ))
         return res
@@ -587,15 +591,17 @@ class Histogram1D:
         self.contents /= self.widths
         self.yerr /= self.widths
         return self
+
     def scalex(self, f: float):
         self.edges *= f
         self.centers *= f
         self.widths *= f
-        self.xerrlow *= f
-        self.xerrup *= f
+        self.xerrlo *= f
+        self.xerrhi *= f
         self.contents /= f
         self.yerr /= abs(f)
         return self
+
     def to_pdf(self, do_width_norm = False):
         if do_width_norm:
             self.width_norm()
@@ -605,7 +611,7 @@ class Histogram1D:
         return self
     def do_barlow(self, val = 1, nsig = 2):
         self.contents = gutils.apply_barlow(self.contents, self.yerr, val, nsig)
-    def smooth(self, n, bin_min = 1, bin_max = None):
+    def smooth(self, n: int, bin_min: int = 1, bin_max = None):
         if bin_max is None:
             bin_max = self.nbins
         if self.nbins < 3:
