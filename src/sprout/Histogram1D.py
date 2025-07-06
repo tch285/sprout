@@ -2,14 +2,15 @@ import json
 from io import TextIOBase
 
 import fit as ff
-import gen_utils as gutils
 import matplotlib.colors as mplc
 import matplotlib.pyplot as plt
 import numpy as np
 import ROOT
 import scipy.optimize as opt
 import uproot as ur
+import utils
 from scipy.stats import gmean
+
 
 class Histogram1D:
     """Class to convert ROOT histogram to NumPy arrays."""
@@ -610,7 +611,7 @@ class Histogram1D:
         self.yerr /= integral
         return self
     def do_barlow(self, val = 1, nsig = 2):
-        self.contents = gutils.apply_barlow(self.contents, self.yerr, val, nsig)
+        self.contents = utils.apply_barlow(self.contents, self.yerr, val, nsig)
     def smooth(self, n: int, bin_min: int = 1, bin_max = None):
         if bin_max is None:
             bin_max = self.nbins
@@ -625,6 +626,6 @@ class Histogram1D:
             xx[i] = self.contents[i + firstbin]
 
         #TODO: xx modified in place? or need to return new np array
-        xx_smoothed = gutils.apply_smoothing(nbins, xx, n)
+        xx_smoothed = utils.apply_smoothing(nbins, xx, n)
         for i in range(nbins):
             self.contents[i+firstbin] = xx_smoothed[i]
