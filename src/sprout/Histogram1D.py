@@ -425,7 +425,7 @@ class Histogram1D:
     def __str__(self): return f"Histogram1D '{self.name}' ({self.label})"
     def __add__(self, other):
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy.contents = self.contents + other
             copy.yerr = self.yerr.copy()
             copy.label = f"{self.label} + {other}"
@@ -439,7 +439,7 @@ class Histogram1D:
 
         return copy
     def __iadd__(self, other):
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             self.contents += other
             self.label = f"{self.label} + {other}"
         elif isinstance(other, Histogram1D):
@@ -453,7 +453,7 @@ class Histogram1D:
         return self
     def __sub__(self, other):
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy.contents = self.contents - other
             copy.yerr = self.yerr.copy()
             copy.label = f"{self.label} - {other}"
@@ -467,7 +467,7 @@ class Histogram1D:
 
         return copy
     def __isub__(self, other):
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             self.contents = self.contents - other
             self.label = f"{self.label} - {other}"
         elif isinstance(other, Histogram1D):
@@ -481,7 +481,7 @@ class Histogram1D:
         return self
     def __mul__(self, other):
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy.contents *= float(other)
             copy.yerr *= abs(float(other))
         elif isinstance(other, Histogram1D):
@@ -494,7 +494,7 @@ class Histogram1D:
 
         return copy
     def __imul__(self, other):
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             self.contents *= float(other)
             self.yerr *= abs(float(other))
         elif isinstance(other, Histogram1D):
@@ -509,7 +509,7 @@ class Histogram1D:
         return self
     def __truediv__(self, other):
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy *= (1.0 / other)
         elif isinstance(other, Histogram1D):
             self._check_matched_edges(other, "/")
@@ -523,7 +523,7 @@ class Histogram1D:
 
         return copy
     def __itruediv__(self, other):
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             self *= (1.0 / other)
         elif isinstance(other, Histogram1D):
             self._check_matched_edges(other, "/=")
@@ -541,7 +541,7 @@ class Histogram1D:
     def __rsub__(self, other):
         # called with other - self. Don't need to define for Histogram1D since __sub__ would be called first
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy.contents = other - self.contents
             copy.label = f"{self.label} - {other}"
         else:
@@ -551,7 +551,7 @@ class Histogram1D:
     def __rtruediv__(self, other):
         # called with other / self. Don't need to define for Histogram1D since __truediv__ would be called first
         copy = self._selfcopy()
-        if isinstance(other, (float, int)):
+        if isinstance(other, (float, int, np.number)):
             copy.contents = np.divide(other.contents, self.contents, out = np.zeros(self.nbins), where = other.contents != 0)
             copy.yerr = self.yerr * np.divide(other.contents, self.contents ** 2, out = np.zeros(self.nbins), where = self.contents != 0)
             copy.label = f"{self.label} / {other.label}"
