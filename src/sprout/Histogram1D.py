@@ -1,14 +1,14 @@
 import json
 from io import TextIOBase
 
-import fit as ff
+import sprout.fit as ff
 import matplotlib.colors as mplc
 import matplotlib.pyplot as plt
 import numpy as np
 import ROOT
 import scipy.optimize as opt
 import uproot as ur
-import utils
+import sprout.utils as utils
 from scipy.stats import gmean
 
 
@@ -91,7 +91,7 @@ class Histogram1D:
     def _from_uproot(cls, file, name, label):
         """Extract Histogram1D from opened uproot file."""
         h = file[name]
-        return cls._from_arrays(name, h.values(), h.axis().edges, h.errors(), label)
+        return cls._from_arrays(name, h.values(), h.axis().edges(), h.errors(), label)
 
     @classmethod
     def from_TH1(cls, h, name, label):
@@ -253,7 +253,7 @@ class Histogram1D:
                          }
             draw_args.update(kwargs)
             # default_alphas = {'e': 0.8, 'm': 1} # alphas for errorbars (e) vs. markers (m)
-            
+
             if 'color' in kwargs:
                 draw_args['mfc'] = mplc.to_rgba(kwargs['color'], 1)
                 draw_args['ecolor'] = mplc.to_rgba(kwargs['color'], draw_args['alpha'])
