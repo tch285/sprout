@@ -1,5 +1,6 @@
 import json
 from io import TextIOBase
+import os
 
 import sprout.fit as ff
 import matplotlib.colors as mplc
@@ -39,6 +40,8 @@ class Histogram1D:
                 return cls.from_json(file, name, label)
             elif file.endswith(".txt"):
                 return cls.from_hepdata(file, name, label)
+            elif file.endswith(".npz"):
+                return cls.from_npz(file, name, label)
         elif isinstance(file, ur.ReadOnlyDirectory):
             return cls._from_uproot(file, name, label)
         elif isinstance(file, TextIOBase):
@@ -50,6 +53,8 @@ class Histogram1D:
             return cls.from_TFile(file, name, label)
         elif isinstance(file, ROOT.TH1):
             return cls.from_TH1(file, name, label)
+        elif isinstance(file, np.lib.npyio.NpzFile):
+            return cls._from_npz(file, name, label)
         raise TypeError(f"Could not parse this type for file: {type(file)}")
 
     @classmethod
@@ -80,6 +85,16 @@ class Histogram1D:
         xerrhi = edges[1:] - centers
 
         return cls(name, heights, centers, edges, [xerrlo, xerrhi], errors, binning, label)
+
+    @classmethod
+    def from_npz(cls, file, name, label):
+        """Extract Histogram1D from npz file."""
+        with np.load(file) as f:
+            return cls._from_npz(f, name, label)
+    @classmethod
+    def _from_npz(cls, file, name, label):
+        """Extract Histogram1D from opened npz file."""
+        pass
 
     @classmethod
     def from_uproot(cls, file, name, label):
@@ -317,7 +332,7 @@ class Histogram1D:
             print(self.transition)
             return self.calculate_fwhm(ax)
 
-    def calculate_transition(self, xrange = 0.3, shift = 4, func = 'quad', exp = 1.5, syst = None):
+    def calculate_transition(self, xrange = 0.3, shift = 4, func = 'quad', exp = 1.5, syst = None, return_pts = False):
         # print(f"Calculating transition for H1D {self.title}.")
         self.fit_idx_min, self.fit_idx_max = self._find_range(xrange, shift)
         fitx = self.centers[self.fit_idx_min:self.fit_idx_max + 1]
@@ -336,10 +351,18 @@ class Histogram1D:
             [self.transition, self.peak, self.a], cov = opt.curve_fit(ff.quad_log, fitx, fity, [fitx[fity.argmax()], fity.max(), -10], unc, absolute_sigma = True)
             self.a, self.peak = factor * self.a, factor * self.peak
             self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+            if return_pts:
+                xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
+                ys = ff.quad_log(xs, self.transition, self.peak, self.a)
+                return xs, ys
         elif func == 'gaus':
             [self.transition, self.peak, self.sg], cov = opt.curve_fit(ff.gaus_log, fitx, fity, [fitx[fity.argmax()], fity.max(), 3.5], unc, absolute_sigma = True)
             self.peak *= factor
             self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+            if return_pts:
+                xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
+                ys = ff.gaus_log(xs, self.transition, self.peak, self.sg)
+                return xs, ys
         elif func == 'cust_TC':
             init_tr = fitx[fity.argmax()]
             init_pk = fity.max()
@@ -356,6 +379,10 @@ class Histogram1D:
             self.peak = (2 * C) / (3 * np.sqrt(3) * T)
             self.peak_err = 2 / (3 * np.sqrt(3)) * self.peak * np.sqrt( (C_err / C)**2 + (T_err / T)**2 - 2 * covTC / (T *C) )
             self.peak *= factor
+            if return_pts:
+                xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
+                ys = func(xs, T, C)
+                return xs, ys
         elif func == 'cust_tp':
             t0 = fitx[fity.argmax()]
             p0 = fity.max()
@@ -364,6 +391,10 @@ class Histogram1D:
             [self.transition, self.peak], cov = opt.curve_fit(func, fitx, fity, [t0, p0], unc, absolute_sigma = True)
             self.peak *= factor
             self.transition_err, self.peak_err = np.sqrt(np.diag(cov))
+            if return_pts:
+                xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
+                ys = func(xs, self.transition, self.peak)
+                return xs, ys
         else:
             print("Invalid function name, exiting.")
             return
@@ -373,9 +404,12 @@ class Histogram1D:
         idx = abs_contents[shift:].argmax() + shift
 
         if isinstance(xrange, int) and xrange >= 1:
+            # set range to be all bins within +- xrange of the extremum
             fit_idx_min = idx - xrange
             fit_idx_max = idx + xrange
         elif isinstance(xrange, float) and xrange < 1:
+            # set range to be all bins that has height within a fraction xrange
+            # of the max height
             max_val = abs_contents[idx]
             cutoff = max_val * (1 - xrange)
 
@@ -387,7 +421,9 @@ class Histogram1D:
 
             fit_idx_min = check(idx - 1, -1, cutoff)
             fit_idx_max = check(idx + 1, 1, cutoff)
-        elif isinstance(xrange, (tuple, list)) and len(xrange) == 3:
+        elif isinstance(xrange, (tuple, list, np.ndarray)) and len(xrange) == 3:
+            # set range of xaxis values. If the edge is within a bin, greedy = True will
+            # take the bin, and greedy = False will not
             xmin, xmax, greedy = xrange
             close_min = np.isclose(self.edges, xmin, rtol = 1e-3)
             if sum(close_min) == 1:
@@ -404,7 +440,7 @@ class Histogram1D:
                 fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 1
             else:
                 fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 2
-            print(fit_idx_min, fit_idx_max)
+            # print(fit_idx_min, fit_idx_max)
         else:
             raise ValueError("X range for fitting invalid.")
         return fit_idx_min, fit_idx_max
@@ -414,10 +450,21 @@ class Histogram1D:
         ys = self.a * np.square(np.log10(xs / self.transition)) + self.peak
         ax.plot(xs, ys, color = color)
 
-    def save(self, f, name):
-        if isinstance(f, np.lib.npyio.NpzFile):
-            pass
-        # return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlo.copy(), orig.xerrhi.copy()], orig.yerr.copy(), orig.binning, orig.label)
+    def save(self, f, name = None, compressed = False):
+        nm = name if name is not None else self.name
+        if f.endswith(".npz"):
+            h = {
+                f"{nm}_cts": self.contents,
+                f"{nm}_edg": self.edges,
+                f"{nm}_err": self.edges,
+            }
+            if compressed:
+                np.savez_compressed(f, **h)
+            else:
+                np.savez(f, **h)
+        else:
+            ext = os.path.splitext(f)
+            raise RuntimeError(f"Filetype {ext} is not supported yet!")
 
     def __len__(self): return self.nbins
     def __getitem__(self, idx): return self.contents[idx]

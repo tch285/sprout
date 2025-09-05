@@ -230,6 +230,7 @@ def enumzip(*args):
 def get_syst(h, do_barlow = False, do_smooth = False, n = 1, bin_min = 1, bin_max = None, nsig = 1.5):
     # assumes h is already a ratio
     # calculate relevant range
+    # returns systematic as a percentage (not fraction)
     if bin_max is None:
         bin_max = h.nbins
     firstbin = bin_min - 1
