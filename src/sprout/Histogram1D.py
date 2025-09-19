@@ -222,7 +222,27 @@ class Histogram1D:
 
         return self
 
-    def add_to(self, ax, color = None, as_step = False, as_marker = False, as_line = False, as_shaded_line = False, **kwargs):
+    def add_to(self, ax, color = None, as_step = False, as_marker = False, as_line = False, as_shaded_line = False, adjust = None, **kwargs):
+        if adjust is None:
+            centers = self.centers
+            xerrlo = self.xerrlo
+            xerrhi = self.xerrhi
+        else:
+            if isinstance(adjust, (float, int, np.number)):
+                if self.binning == "log":
+                    centers = self.centers * adjust
+                else:
+                    centers = self.centers + adjust
+                if as_step or as_marker or as_line or as_shaded_line:
+                    print("[w] asked for adjust on non-histogram display, ignoring...")
+                xerrlo = centers - self.edges[:-1]
+                xerrhi = self.edges[1:] - centers
+            else:
+                print(f"[w] invalid type '{type(adjust)}' for adjust value: {adjust}, ignoring...")
+                centers = self.centers
+                xerrlo = self.xerrlo
+                xerrhi = self.xerrhi
+
         if as_step:
             return ax.hist(self.edges[:-1], self.edges, weights = self.contents,
                     histtype = 'step', color = color, **kwargs)
@@ -292,7 +312,7 @@ class Histogram1D:
             # print(draw_args['ecolor'])
             # print(draw_args['mec'])
             draw_args.pop('alpha')
-            return ax.errorbar(self.centers, self.contents, self.yerr, [self.xerrlo, self.xerrhi], **draw_args)
+            return ax.errorbar(centers, self.contents, self.yerr, [xerrlo, xerrhi], **draw_args)
 
     def plot(self, filename: str, xlabel = "", ylabel = "", show: bool = False):
         fig, ax = plt.subplots()
@@ -421,26 +441,29 @@ class Histogram1D:
 
             fit_idx_min = check(idx - 1, -1, cutoff)
             fit_idx_max = check(idx + 1, 1, cutoff)
-        elif isinstance(xrange, (tuple, list, np.ndarray)) and len(xrange) == 3:
-            # set range of xaxis values. If the edge is within a bin, greedy = True will
-            # take the bin, and greedy = False will not
-            xmin, xmax, greedy = xrange
-            close_min = np.isclose(self.edges, xmin, rtol = 1e-3)
-            if sum(close_min) == 1:
-                fit_idx_min = np.argwhere(close_min)[0, 0]
-            elif greedy:
-                fit_idx_min = np.searchsorted(self.edges, xmin, side='left') - 1
-            else:
-                fit_idx_min = np.searchsorted(self.edges, xmin, side='left')
+        elif isinstance(xrange, (tuple, list, np.ndarray)):
+            if len(xrange) == 3:
+                # set range of xaxis values. If the edge is within a bin, greedy = True will
+                # take the bin, and greedy = False will not
+                xmin, xmax, greedy = xrange
+                close_min = np.isclose(self.edges, xmin, rtol = 1e-3)
+                if sum(close_min) == 1:
+                    fit_idx_min = np.argwhere(close_min)[0, 0]
+                elif greedy:
+                    fit_idx_min = np.searchsorted(self.edges, xmin, side='left') - 1
+                else:
+                    fit_idx_min = np.searchsorted(self.edges, xmin, side='left')
 
-            close_max = np.isclose(self.edges, xmax, rtol = 1e-3)
-            if sum(close_max) == 1:
-                fit_idx_max = np.argwhere(close_max)[0, 0]
-            elif greedy:
-                fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 1
-            else:
-                fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 2
-            # print(fit_idx_min, fit_idx_max)
+                close_max = np.isclose(self.edges, xmax, rtol = 1e-3)
+                if sum(close_max) == 1:
+                    fit_idx_max = np.argwhere(close_max)[0, 0]
+                elif greedy:
+                    fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 1
+                else:
+                    fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 2
+                # print(fit_idx_min, fit_idx_max)
+            elif len(xrange) == 2:
+                fit_idx_min, fit_idx_max = xrange
         else:
             raise ValueError("X range for fitting invalid.")
         return fit_idx_min, fit_idx_max

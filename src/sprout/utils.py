@@ -182,7 +182,7 @@ def check_projection(filename: str, pTmin: int, pTmax: int):
         return True
     else:
         return False
-    
+
 def get_aspect(ax):
     # NOTE: doesn't work with semi log scales lmfao
     # Total figure size
