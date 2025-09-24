@@ -197,7 +197,7 @@ def get_aspect(ax):
 
     return disp_ratio / data_ratio
 
-def draw_syst(ax, hist, syst, color, alpha, flat_syst = False, **kwargs):
+def draw_syst(ax, hist, syst, color, alpha, abs_syst = False, **kwargs):
     edges = hist.edges
     for bin_idx in range(len(edges) - 1):
         # bin_idx = 20
@@ -205,7 +205,7 @@ def draw_syst(ax, hist, syst, color, alpha, flat_syst = False, **kwargs):
         xhi = edges[bin_idx + 1]
         systematic = syst[bin_idx]
         height = hist.contents[bin_idx]
-        err = systematic if flat_syst else height * systematic / 100
+        err = systematic if abs_syst else height * systematic / 100
         fill = ax.fill_between([xlo, xhi], height - err, height + err, color = color, alpha = alpha, ec = 'none', **kwargs)
     return fill
 
