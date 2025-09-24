@@ -370,18 +370,26 @@ class Histogram1D:
         if func == 'quad':
             [self.transition, self.peak, self.a], cov = opt.curve_fit(ff.quad_log, fitx, fity, [fitx[fity.argmax()], fity.max(), -10], unc, absolute_sigma = True)
             self.a, self.peak = factor * self.a, factor * self.peak
-            self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+            self.transition_err, self.peak_err, self.a_err = np.sqrt(np.diag(cov))
             if return_pts:
                 xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
                 ys = ff.quad_log(xs, self.transition, self.peak, self.a)
                 return xs, ys
         elif func == 'gaus':
-            [self.transition, self.peak, self.sg], cov = opt.curve_fit(ff.gaus_log, fitx, fity, [fitx[fity.argmax()], fity.max(), 3.5], unc, absolute_sigma = True)
+            [self.transition, self.peak, self.sg], cov = opt.curve_fit(ff.gaus_log, fitx, fity, [fitx[fity.argmax()], fity.max(), 0.9], unc, absolute_sigma = True)
             self.peak *= factor
-            self.transition_err, self.peak_err, *rem = np.sqrt(np.diag(cov))
+            self.transition_err, self.peak_err, self.sg_err = np.sqrt(np.diag(cov))
             if return_pts:
                 xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
                 ys = ff.gaus_log(xs, self.transition, self.peak, self.sg)
+                return xs, ys
+        elif func == 'gaus_log2':
+            [self.mu, self.peak, self.sg], cov = opt.curve_fit(ff.gaus_log2, fitx, fity, [np.log(fitx[fity.argmax()]), fity.max(), 0.9], unc, absolute_sigma = True)
+            self.peak *= factor
+            self.mu_err, self.peak_err, self.sg_err = np.sqrt(np.diag(cov))
+            if return_pts:
+                xs = np.logspace(np.log10(fitx[0]), np.log10(fitx[-1]))
+                ys = ff.gaus_log2(xs, self.mu, self.peak, self.sg)
                 return xs, ys
         elif func == 'cust_TC':
             init_tr = fitx[fity.argmax()]
