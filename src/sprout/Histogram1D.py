@@ -11,7 +11,7 @@ import scipy.optimize as opt
 import uproot as ur
 import sprout.utils as utils
 from scipy.stats import gmean
-
+from functools import singledispatchmethod
 
 class Histogram1D:
     """Class to convert ROOT histogram to NumPy arrays."""
@@ -31,31 +31,95 @@ class Histogram1D:
         self.label = label
         self.transition = None
 
+    @singledispatchmethod
     @classmethod
-    def load(cls, file, name, label = None):
-        if isinstance(file, str):
-            if file.endswith(".root"):
-                return cls.from_uproot(file, name, label)
-            elif file.endswith(".json"):
-                return cls.from_json(file, name, label)
-            elif file.endswith(".txt"):
-                return cls.from_hepdata(file, name, label)
-            elif file.endswith(".npz"):
-                return cls.from_npz(file, name, label)
-        elif isinstance(file, ur.ReadOnlyDirectory):
-            return cls._from_uproot(file, name, label)
-        elif isinstance(file, TextIOBase):
-            if file.name.endswith(".json"):
-                return cls._from_json(file, name, label)
-            elif file.name.endswith(".txt"):
-                return cls._from_hepdata(file, name, label)
-        elif isinstance(file, ROOT.TFile):
-            return cls.from_TFile(file, name, label)
-        elif isinstance(file, ROOT.TH1):
-            return cls.from_TH1(file, name, label)
-        elif isinstance(file, np.lib.npyio.NpzFile):
-            return cls._from_npz(file, name, label)
-        raise TypeError(f"Could not parse this type for file: {type(file)}")
+    def load(cls, file, *args, **kwargs):
+        raise NotImplementedError(f'Cannot extract histogram from type {type(file)}.')
+
+    @load.register
+    @classmethod
+    def _load(cls, h2: ROOT.TH2, axis, proj_range, name = "", label = ""):
+        xmin, xmax = proj_range
+        if axis in [0, 'x']:
+            # project onto x axis
+            nbins = h2.GetNbinsY()
+            if h2.GetYaxis().GetYbins().GetSize() != 0: # variable edges
+                edges = np.array(h2.GetYaxis().GetYbins())
+            else: # fixed edges
+                edges = np.linspace(h2.GetYaxis().GetYmin(), h2.GetYaxis().GetYmax(), nbins + 1)
+            imin, imax = utils.find_bins(edges, xmin, xmax, True, True, True)
+            # ROOT bins are 1-indexed, so add one
+            imin += 1
+            imax += 1
+            h1 = h2.ProjectionX(name, imin, imax, "e")
+        elif axis in [1, 'y']:
+            # project on y axis
+            nbins = h2.GetNbinsX()
+            if h2.GetXaxis().GetXbins().GetSize() != 0: # variable edges
+                edges = np.array(h2.GetXaxis().GetXbins())
+            else: # fixed edges
+                edges = np.linspace(h2.GetXaxis().GetXmin(), h2.GetXaxis().GetXmax(), nbins + 1)
+            imin, imax = utils.find_bins(edges, xmin, xmax, True, True, True)
+            # ROOT bins are 1-indexed, so add one
+            imin += 1
+            imax += 1
+            h1 = h2.ProjectionY(name, imin, imax, "e")
+        else:
+            raise ValueError(f"Cannot parse axis '{axis}'.")
+        return cls.load(h1, name, label)
+    @load.register
+    @classmethod
+    def _load(cls, file: str, name = "", label = ""):
+        if file.endswith(".root"):
+            with ur.open(file) as f:
+                return cls._from_uproot(f, name, label)
+        elif file.endswith(".json"):
+            with open(file) as f:
+                return cls._from_json(f, name, label)
+        elif file.endswith(".txt"):
+            with open(file) as f:
+                return cls._from_hepdata(f, name, label)
+        elif file.endswith(".npz"):
+            with np.load(file) as f:
+                return cls._from_npz(f, name, label)
+    @load.register
+    @classmethod
+    def _load(cls, file: TextIOBase, name = "", label = ""):
+        if file.name.endswith(".json"):
+            return cls._from_json(file, name, label)
+        elif file.name.endswith(".txt"):
+            return cls._from_hepdata(file, name, label)
+    @load.register
+    @classmethod
+    def _load(cls, file: np.lib.npyio.NpzFile, name, label):
+        """Extract Histogram1D from opened npz file."""
+        pass
+    @load.register
+    @classmethod
+    def _load(cls, file: ur.ReadOnlyDirectory, name, label = ""):
+        """Extract Histogram1D from opened uproot file."""
+        h = file[name]
+        return cls._from_arrays(name, h.values(), h.axis().edges(), h.errors(), label)
+    @load.register
+    @classmethod
+    def _load(cls, h: ROOT.TH1, name = "", label = ""):
+        """Extract Histogram1D from existing TH1 object."""
+        hname = name if name else h.GetName()
+
+        nbins = h.GetNbinsX()
+        if h.GetXaxis().GetXbins().GetSize() != 0: # variable edges
+            edges = np.array(h.GetXaxis().GetXbins())
+        else: # fixed edges
+            edges = np.linspace(h.GetXaxis().GetXmin(), h.GetXaxis().GetXmax(), nbins + 1)
+
+        heights = np.array([h.GetBinContent(i) for i in range(1, nbins + 1)])
+        errors = np.array([h.GetBinErrorLow(i) for i in range(1, nbins + 1)])
+        return cls._from_arrays(hname, heights, edges, errors, label)
+    @load.register
+    @classmethod
+    def _load(cls, file: ROOT.TFile, name, label = ""):
+        """Extract Histogram1D from open TFile object."""
+        return cls.load(file.Get(name), name, label)
 
     @classmethod
     def _from_arrays(cls, name, heights, edges, errors, label = ""):
@@ -87,55 +151,6 @@ class Histogram1D:
         return cls(name, heights, centers, edges, [xerrlo, xerrhi], errors, binning, label)
 
     @classmethod
-    def from_npz(cls, file, name, label):
-        """Extract Histogram1D from npz file."""
-        with np.load(file) as f:
-            return cls._from_npz(f, name, label)
-    @classmethod
-    def _from_npz(cls, file, name, label):
-        """Extract Histogram1D from opened npz file."""
-        pass
-
-    @classmethod
-    def from_uproot(cls, file, name, label):
-        """Extract Histogram1D from file with uproot."""
-        with ur.open(file) as f:
-            return cls._from_uproot(f, name, label)
-
-    @classmethod
-    def _from_uproot(cls, file, name, label):
-        """Extract Histogram1D from opened uproot file."""
-        h = file[name]
-        return cls._from_arrays(name, h.values(), h.axis().edges(), h.errors(), label)
-
-    @classmethod
-    def from_TH1(cls, h, name, label):
-        """Extract Histogram1D from existing TH1 object."""
-        hname = name if name else h.GetName()
-
-        nbins = h.GetNbinsX()
-        if h.GetXaxis().GetXbins().GetSize() != 0: # variable edges
-            edges = np.array(h.GetXaxis().GetXbins())
-        else: # fixed edges
-            edges = np.linspace(h.GetXaxis().GetXmin(), h.GetXaxis().GetXmax(), nbins + 1)
-
-        heights = np.array([h.GetBinContent(i) for i in range(1, nbins + 1)])
-        errors = np.array([h.GetBinErrorLow(i) for i in range(1, nbins + 1)])
-        return cls._from_arrays(hname, heights, edges, errors, label)
-
-    @classmethod
-    def from_TFile(cls, file, name, label):
-        """Extract Histogram1D from open TFile object."""
-        h = file.Get(name)
-        return cls.from_TH1(h, name, label)
-
-    @classmethod
-    def from_hepdata(cls, file, name, label):
-        """Extract Histogram1D from HEPData txt file."""
-        with open(file) as f:
-            return cls._from_hepdata(f, name, label)
-
-    @classmethod
     def _from_hepdata(cls, file, name, label):
         """Extract Histogram1D from opened HEPData txt file."""
         lines = file.read().splitlines()
@@ -145,14 +160,7 @@ class Histogram1D:
         binL, binR, heights, errors, syst = values
         assert len(binL) == len(binR)
         edges = np.append(binL, binR[-1])
-
         return cls._from_arrays(hname, heights, edges, errors, label), syst
-
-    @classmethod
-    def from_json(cls, path, name, label = None):
-        """Extract Histogram1D from JSON file."""
-        with open(path) as file:
-            return cls._from_json(file, name, label)
 
     @classmethod
     def _from_json(cls, file, name, label):
@@ -183,6 +191,17 @@ class Histogram1D:
         else:
             raise ValueError(f"Binning style {binning} is invalid.")
         self.binning = binning
+
+    def integral(self, xmin, xmax, greedy = True, err = False):
+        imin, imax = utils.find_bins(self.edges, xmin, xmax, greedy, greedy, True)
+        # ROOT bins are 1-indexed, so add one
+        # imin += 1
+        # imax += 1
+        intg = np.sum(self.contents[imin : imax + 1])
+        if not err:
+            return intg
+        else:
+            return intg, np.sqrt(np.sum(self.yerr[imin: imax + 1] ** 2))
 
     def norm_max(self, norm = 1):
         f = norm / self.contents.max()
@@ -219,7 +238,7 @@ class Histogram1D:
             self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
             errsq = self.yerr ** 2
             self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1))
-
+        self.nbins //= 2
         return self
 
     def add_to(self, ax, color = None, as_step = False, as_marker = False, as_line = False, as_shaded_line = False, adjust = None, **kwargs):
@@ -454,22 +473,7 @@ class Histogram1D:
                 # set range of xaxis values. If the edge is within a bin, greedy = True will
                 # take the bin, and greedy = False will not
                 xmin, xmax, greedy = xrange
-                close_min = np.isclose(self.edges, xmin, rtol = 1e-3)
-                if sum(close_min) == 1:
-                    fit_idx_min = np.argwhere(close_min)[0, 0]
-                elif greedy:
-                    fit_idx_min = np.searchsorted(self.edges, xmin, side='left') - 1
-                else:
-                    fit_idx_min = np.searchsorted(self.edges, xmin, side='left')
-
-                close_max = np.isclose(self.edges, xmax, rtol = 1e-3)
-                if sum(close_max) == 1:
-                    fit_idx_max = np.argwhere(close_max)[0, 0]
-                elif greedy:
-                    fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 1
-                else:
-                    fit_idx_max = np.searchsorted(self.edges, xmax, side='left') - 2
-                # print(fit_idx_min, fit_idx_max)
+                fit_idx_min, fit_idx_max = utils.find_bins(self.edges, xmin, xmax, greedy, greedy, False)
             elif len(xrange) == 2:
                 fit_idx_min, fit_idx_max = xrange
         else:
@@ -501,6 +505,12 @@ class Histogram1D:
     def __getitem__(self, idx): return self.contents[idx]
     def __setitem__(self, idx, val): self.contents[idx] = val
     def __str__(self): return f"Histogram1D '{self.name}' ({self.label})"
+    def __eq__(self, other):
+        if isinstance(other, Histogram1D):
+            return self.nbins == other.nbins and np.allclose(self.contents, other.contents) \
+                and self % other and np.allclose(self.centers, other.centers) \
+                and np.allclose(self.yerr, other.yerr)
+        return False
     def __add__(self, other):
         copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
@@ -643,10 +653,7 @@ class Histogram1D:
         return copy
     def __mod__(self, other):
         """Check if two Histograms have compatible bin edges."""
-        if np.allclose(self.edges, other.edges):
-            return True
-        else:
-            return False
+        return np.allclose(self.edges, other.edges)
     def __abs__(self):
         copy = self._selfcopy()
         copy.contents = np.abs(copy.contents)

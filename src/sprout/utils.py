@@ -88,7 +88,7 @@ def convert_from_name(code: str):
     else:
         return code
         # raise ValueError(f"Histogram name {code} couldn't be matched")
-    
+
 def convert_to_op(letter):
     if letter == "P":
         op = "{+}"
@@ -225,7 +225,34 @@ def adjust_syst_patch(leg, hl = 2):
             legobj.set(x = oldx + oldwidth * 0.5 * (1 - 1 / hl), width = oldwidth / hl)
 
 def enumzip(*args):
-    return enumerate(zip(*args))
+    for i, els in enumerate(zip(*args)):
+        yield i, *els
+
+def find_bins(edges, val_L, val_R, greedy_L, greedy_R, warn):
+    close_min = np.isclose(edges, val_L, rtol = 1e-3)
+    if sum(close_min) == 1:
+        idx_min = np.argwhere(close_min)[0, 0]
+    else:
+        if warn:
+            print(f"Could not find exact match for edge {val_L}.")
+        if greedy_L:
+            idx_min = np.searchsorted(edges, val_L, side='left') - 1
+        else:
+            idx_min = np.searchsorted(edges, val_L, side='left')
+
+    close_max = np.isclose(edges, val_R, rtol = 1e-3)
+    if sum(close_max) == 1:
+        idx_max = np.argwhere(close_max )[0, 0] - 1
+    else:
+        if warn:
+            print(f"Could not find exact match for edge {val_R}.")
+        if greedy_R:
+            idx_max = np.searchsorted(edges, val_R, side='left') - 1
+            # idx_max = np.searchsorted(edges, val_R, side='left')
+        else:
+            idx_max = np.searchsorted(edges, val_R, side='left') - 2
+            # idx_max = np.searchsorted(edges, val_R, side='left') - 1
+    return int(idx_min), int(idx_max)
 
 def get_syst(h, do_barlow = False, do_smooth = False, n = 1, bin_min = 1, bin_max = None, nsig = 1.5):
     # assumes h is already a ratio
