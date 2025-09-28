@@ -1,17 +1,20 @@
 import json
-from io import TextIOBase
 import os
+from functools import singledispatchmethod
+from io import TextIOBase
 
-import sprout.fit as ff
 import matplotlib.colors as mplc
 import matplotlib.pyplot as plt
 import numpy as np
 import ROOT
 import scipy.optimize as opt
 import uproot as ur
-import sprout.utils as utils
 from scipy.stats import gmean
-from functools import singledispatchmethod
+
+import sprout.fit as ff
+import sprout.operations as ops
+import sprout.utils as utils
+
 
 class Histogram1D:
     """Class to convert ROOT histogram to NumPy arrays."""
@@ -238,7 +241,7 @@ class Histogram1D:
             self.contents = np.sum(self.contents.reshape(-1, n), axis=1)
             errsq = self.yerr ** 2
             self.yerr = np.sqrt(np.sum(errsq.reshape(-1, n), axis=1))
-        self.nbins //= 2
+        self.nbins //= n
         return self
 
     def add_to(self, ax, color = None, as_step = False, as_marker = False, as_line = False, as_shaded_line = False, adjust = None, **kwargs):
@@ -501,6 +504,10 @@ class Histogram1D:
             ext = os.path.splitext(f)
             raise RuntimeError(f"Filetype {ext} is not supported yet!")
 
+    @property
+    def yerr_rel(self):
+        return np.abs(ops.safediv(self.yerr, self.contents))
+
     def __len__(self): return self.nbins
     def __getitem__(self, idx): return self.contents[idx]
     def __setitem__(self, idx, val): self.contents[idx] = val
@@ -515,58 +522,30 @@ class Histogram1D:
         copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
             copy.contents = self.contents + other
-            copy.yerr = self.yerr.copy()
-            copy.label = f"{self.label} + {other}"
         elif isinstance(other, Histogram1D):
             self._check_matched_edges(other, "+")
             copy.contents = self.contents + other.contents
-            copy.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
-            copy.label = f"{self.label} + {other.label}"
+            copy.yerr = ops.qadd(self.yerr, other.yerr)
         else:
             return NotImplemented
 
         return copy
     def __iadd__(self, other):
-        if isinstance(other, (float, int, np.number)):
-            self.contents += other
-            self.label = f"{self.label} + {other}"
-        elif isinstance(other, Histogram1D):
-            self._check_matched_edges(other, "+=")
-            self.contents += other.contents
-            self.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
-            self.label = f"{self.label} + {other.label}"
-        else:
-            return NotImplemented
-
-        return self
+        return self + other # want H1D to be immutable (older refs point to original H1D)
     def __sub__(self, other):
         copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
             copy.contents = self.contents - other
-            copy.yerr = self.yerr.copy()
-            copy.label = f"{self.label} - {other}"
         elif isinstance(other, Histogram1D):
             self._check_matched_edges(other, "-")
             copy.contents = self.contents - other.contents
-            copy.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
-            copy.label = f"{copy.label} - {other.label}"
+            copy.yerr = ops.qadd(self.yerr, other.yerr)
         else:
             return NotImplemented
 
         return copy
     def __isub__(self, other):
-        if isinstance(other, (float, int, np.number)):
-            self.contents = self.contents - other
-            self.label = f"{self.label} - {other}"
-        elif isinstance(other, Histogram1D):
-            self._check_matched_edges(other, "-=")
-            self.contents -= other.contents
-            self.yerr = np.sqrt(np.square(self.yerr) + np.square(other.yerr))
-            self.label = f"{self.label} - {other.label}"
-        else:
-            return NotImplemented
-
-        return self
+        return self - other # want H1D to be immutable (older refs point to original H1D)
     def __mul__(self, other):
         copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
@@ -575,78 +554,62 @@ class Histogram1D:
         elif isinstance(other, Histogram1D):
             self._check_matched_edges(other, "*")
             copy.contents = self.contents * other.contents
-            copy.yerr = np.sqrt(np.square(self.yerr * other.contents) + np.square(other.yerr * self.contents))
-            copy.label = f"{copy.label} \u00D7 {other.label}"
+            copy.yerr = np.abs(copy.contents) * ops.qadd(self.yerr_rel, other.yerr_rel)
+            # copy.yerr = ops.qadd(self.yerr * other.contents, other.yerr * self.contents)
         else:
             return NotImplemented
 
         return copy
     def __imul__(self, other):
-        if isinstance(other, (float, int, np.number)):
-            self.contents *= float(other)
-            self.yerr *= abs(float(other))
-        elif isinstance(other, Histogram1D):
-            self._check_matched_edges(other, "*=")
-            # yerr must be modified before contents
-            self.yerr = np.sqrt(np.square(self.yerr * other.contents) + np.square(other.yerr * self.contents))
-            self.contents = self.contents * other.contents
-            self.label = f"{self.label} \u00D7 {other.label}"
-        else:
-            return NotImplemented
-
-        return self
+        return self * other
     def __truediv__(self, other):
-        copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
-            copy *= (1.0 / other)
+            return self * (1.0 / other)
         elif isinstance(other, Histogram1D):
+            copy = self._selfcopy()
             self._check_matched_edges(other, "/")
-            copy.contents = np.divide(self.contents, other.contents, out = np.zeros(self.nbins), where = other.contents != 0)
-            copy.yerr = np.sqrt(np.divide(self.yerr**2 , other.contents**2, out = np.zeros(self.nbins), where = other.contents != 0)
-                              + np.divide(self.contents**2 , other.contents**4, out = np.zeros(self.nbins), where = other.contents != 0) * other.yerr**2)
+            copy.contents = ops.safediv(self.contents, other.contents)
+            copy.yerr = np.abs(copy.contents) * ops.qadd(self.yerr_rel, other.yerr_rel)
+            # copy.yerr = np.sqrt(ops.safediv(self.yerr**2 , other.contents**2) + ops.safediv(self.contents**2 , other.contents**4) * other.yerr**2)
             # copy.yerr = np.abs(np.divide(self.contents, other.contents, out = np.zeros_like(self.contents), where = other.contents != 0)) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(other.yerr, other.contents, out = np.zeros_like(other.yerr), where = other.contents != 0)))
-            copy.label = f"{self.label} / {other.label}"
+            return copy
         else:
             return NotImplemented
-
-        return copy
     def __itruediv__(self, other):
+        return self / other
+    def __floordiv__(self, other):
+        """Return self / other, assuming fully correlated uncertainties."""
         if isinstance(other, (float, int, np.number)):
-            self *= (1.0 / other)
+            return self * (1.0 / other)
         elif isinstance(other, Histogram1D):
-            self._check_matched_edges(other, "/=")
-            self.yerr = np.sqrt(np.divide(self.yerr**2 , other.contents**2, out = np.zeros(self.nbins), where = other.contents != 0)
-                              + np.divide(self.contents**2 , other.contents**4, out = np.zeros(self.nbins), where = other.contents != 0) * other.yerr**2)
-            # self.yerr = np.divide(self.contents, other.contents, out = np.zeros_like(self.contents), where = other.contents != 0) * np.sqrt(np.square(np.divide(self.yerr, self.contents, out = np.zeros_like(self.yerr), where = self.contents != 0)) + np.square(np.divide(f.yerr, other.contents, out = np.zeros_like(f.yerr), where = other.contents != 0)))
-            self.contents = np.divide(self.contents, other.contents, out = np.zeros(self.nbins), where = other.contents != 0)
-            self.label = f"{self.label} / {other.label}"
+            copy = self._selfcopy()
+            self._check_matched_edges(other, "/")
+            copy.contents = ops.safediv(self.contents, other.contents)
+            copy.yerr = np.abs(copy.contents * (self.yerr_rel - other.yerr_rel))
+            return copy
         else:
             return NotImplemented
-
-        return self
+    def __ifloordiv__(self, other):
+        return self // other
     __radd__ = __add__
     __rmul__ = __mul__
     def __rsub__(self, other):
         # called with other - self. Don't need to define for Histogram1D since __sub__ would be called first
-        copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
+            copy = self._selfcopy()
             copy.contents = other - self.contents
-            copy.label = f"{self.label} - {other}"
+            return copy
         else:
             return NotImplemented
-
-        return copy
     def __rtruediv__(self, other):
         # called with other / self. Don't need to define for Histogram1D since __truediv__ would be called first
-        copy = self._selfcopy()
         if isinstance(other, (float, int, np.number)):
-            copy.contents = np.divide(other.contents, self.contents, out = np.zeros(self.nbins), where = other.contents != 0)
-            copy.yerr = self.yerr * np.divide(other.contents, self.contents ** 2, out = np.zeros(self.nbins), where = self.contents != 0)
-            copy.label = f"{self.label} / {other.label}"
+            copy = self._selfcopy()
+            copy.contents = np.divide(other, self.contents, out = np.zeros(self.nbins), where = self.contents != 0)
+            copy.yerr = self.yerr * np.divide(other, self.contents ** 2, out = np.zeros(self.nbins), where = self.contents != 0)
+            return copy
         else:
             return NotImplemented
-
-        return copy
     def __neg__(self):
         copy = self._selfcopy()
         copy.contents = - copy.contents
@@ -714,3 +677,5 @@ class Histogram1D:
         xx_smoothed = utils.apply_smoothing(nbins, xx, n)
         for i in range(nbins):
             self.contents[i+firstbin] = xx_smoothed[i]
+
+H1D = Histogram1D
