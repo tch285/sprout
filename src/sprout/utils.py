@@ -128,9 +128,9 @@ def convert_from_info_sigma(ipoint: int, cEEC_type: str):
     elif cEEC_type == "Q/T":
         return "$\\Sigma^\\mathcal{Q}_\\mathregular{EEC} / \\Sigma_\\mathregular{EEC}$"
     elif cEEC_type == "L/T":
-        return r"$\\Sigma^{\\pm\\pm}_\\mathregular{EEC} / \\Sigma_\\mathregular{EEC}$"
+        return "$\\Sigma^{\\pm\\pm}_\\mathregular{EEC} / \\Sigma_\\mathregular{EEC}$"
     elif cEEC_type == "UL/T":
-        return r"$\\Sigma^\text{+" + u"\u2212" + "}_\\mathregular{EEC} / \\Sigma_\\mathregular{EEC}$"
+        return r"$\Sigma^\text{+" + u"\u2212" + "}_\\mathregular{EEC} / \\Sigma_\\mathregular{EEC}$"
     else:
         raise ValueError(f"Given cEEC type '{cEEC_type}' not recognized.")
 
@@ -258,9 +258,10 @@ def get_syst(h, do_barlow = False, do_smooth = False, n = 1, bin_min = 1, bin_ma
     # assumes h is already a ratio
     # calculate relevant range
     # returns systematic as a percentage (not fraction)
+    # bin_min, bin_max: inclusive bin indices (1-indexed)
     if bin_max is None:
         bin_max = h.nbins
-    firstbin = bin_min - 1
+    firstbin = bin_min - 1 # inclusive bin indices (0-indexed)
     lastbin = bin_max - 1
     nbins = lastbin - firstbin + 1
     # extract relevant slice
@@ -274,7 +275,7 @@ def get_syst(h, do_barlow = False, do_smooth = False, n = 1, bin_min = 1, bin_ma
         if nbins < 3:
             print(f"Smooth only works for histograms with 3 or more bins (nbins = {nbins})")
             return
-        xx = apply_smoothing(nbins, xx, n)
+        xx = apply_smoothing(xx, n)
 
     full_syst[firstbin:lastbin + 1] = xx[:] * 100
     return full_syst
@@ -296,7 +297,7 @@ def get_syst_wavg(h, bin_min = 1, bin_max = None):
     return np.average(dev, weights = w) * 100
 
 def get_syst_smoothed(contents, n = 1, bin_min = 1, bin_max = None):
-    # assumes h is already a ratio
+    # assumes contents is already a ratio
     # calculate relevant range
     if bin_max is None:
         bin_max = len(contents)
@@ -309,12 +310,13 @@ def get_syst_smoothed(contents, n = 1, bin_min = 1, bin_max = None):
     if nbins < 3:
         print(f"Smooth only works for histograms with 3 or more bins (nbins = {nbins})")
         return
-    xx = apply_smoothing(nbins, xx, n)
+    xx = apply_smoothing(xx, n)
 
     contents[firstbin:lastbin + 1] = xx[:]
     return contents
 
-def apply_smoothing(nn, xx, ntimes):
+def apply_smoothing(xx, ntimes):
+    nn = len(xx)
     if nn < 3:
         print(f"Smoothing need at least 3 points for smoothing: n = {nn}")
         return
