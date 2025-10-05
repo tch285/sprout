@@ -183,8 +183,12 @@ class Histogram1D:
     def copy(cls, orig):
         return cls("", orig.contents.copy(), orig.centers.copy(), orig.edges.copy(), [orig.xerrlo.copy(), orig.xerrhi.copy()], orig.yerr.copy(), orig.binning, orig.label)
 
-    def _selfcopy(self):
-        return Histogram1D(self.name, self.contents.copy(), self.centers.copy(), self.edges.copy(), [self.xerrlo.copy(), self.xerrhi.copy()], self.yerr.copy(), self.binning, self.label)
+    def _selfcopy(self, imin = None, imax = None):
+        if imin is None:
+            imin = 0
+        if imax is None:
+            imax = self.nbins - 1
+        return Histogram1D(self.name, self.contents[imin:imax+1].copy(), self.centers[imin:imax+1].copy(), self.edges[imin:imax+2].copy(), [self.xerrlo[imin:imax+1].copy(), self.xerrhi[imin:imax+1].copy()], self.yerr[imin:imax+1].copy(), self.binning, self.label)
 
     def set_binning(self, binning):
         if binning == 'lin':
@@ -509,7 +513,15 @@ class Histogram1D:
         return np.abs(ops.safediv(self.yerr, self.contents))
 
     def __len__(self): return self.nbins
-    def __getitem__(self, idx): return self.contents[idx]
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            if isinstance(idx.start, int) and isinstance(idx.stop, int): # indices passed
+                return self._selfcopy(idx.start, idx.stop)
+            else: # xrange passed
+                imin, imax = utils.find_bins(self.edges, idx.start, idx.stop, False, False, False)
+                return self._selfcopy(imin, imax)
+        else:
+            return self.contents[idx]
     def __setitem__(self, idx, val): self.contents[idx] = val
     def __str__(self): return f"Histogram1D '{self.name}' ({self.label})"
     def __eq__(self, other):
